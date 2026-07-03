@@ -1,56 +1,136 @@
-# Welcome to your Expo app 👋
+# Room Scout
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Room Scout is an Expo React Native app for finding and listing dormitories. It uses Expo Router, Supabase, and native Android maps through `react-native-maps`.
 
-## Get started
+## Prerequisites
 
-1. Install dependencies
+Install these before running the app:
+
+- Node.js 22.13.x or newer for Expo SDK 56
+- npm
+- Git
+- Android Studio with Android SDK, platform tools, and an Android emulator
+- Expo/EAS CLI when building APKs: `npm install -g eas-cli`
+- A Supabase project
+- A Google Cloud project with Maps SDK for Android enabled
+
+## First-Time Setup
+
+1. Clone the repository:
+
+   ```bash
+   git clone <repository-url>
+   cd room-scout
+   ```
+
+2. Install dependencies:
 
    ```bash
    npm install
    ```
 
-2. Start the app
+3. Create your local environment file:
 
    ```bash
-   npx expo start
+   copy .env.example .env
    ```
 
-In the output, you'll find options to open the app in a
+4. Fill in `.env`:
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+   ```env
+   EXPO_PUBLIC_SUPABASE_URL=your_supabase_project_url
+   EXPO_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+   GOOGLE_MAPS_API_KEY=your_android_google_maps_api_key
+   ```
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+5. Set up Supabase:
 
-## Get a fresh project
+   - Open your Supabase project.
+   - Go to SQL Editor.
+   - Run `supabase/schema.sql`.
+   - If needed, run `supabase/additions.sql`.
+   - Create a public storage bucket named `uploaded_images` for dorm photos.
 
-When you're ready, run:
+## Google Maps Setup
+
+Android APKs need a real Google Maps API key. Do not use a fake demo key.
+
+1. In Google Cloud Console, enable **Maps SDK for Android**.
+2. Create an API key.
+3. Restrict the key to Android apps.
+4. Add this package name:
+
+   ```text
+   com.snap.rooms
+   ```
+
+5. Add the SHA-1 certificate fingerprint for the keystore used by the build.
+   - For local/debug builds, use your debug keystore SHA-1.
+   - For EAS builds, get the SHA-1 from the Expo project credentials after a build is created.
+6. Put the key in `.env` as `GOOGLE_MAPS_API_KEY`.
+7. Rebuild the APK after changing the key. The key is native build config, so updating `.env` alone will not fix an already-built APK.
+
+The key is read by `app.config.js` and passed to the Expo `react-native-maps` config plugin as `androidGoogleMapsApiKey`.
+
+For EAS cloud builds, also create the key in the EAS environment used by the build profile:
 
 ```bash
-npm run reset-project
+eas env:create --name GOOGLE_MAPS_API_KEY --value your_android_google_maps_api_key --environment preview --visibility sensitive
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Repeat for `development` or `production` if you build those profiles.
 
-### Other setup steps
+## Run on Android Emulator
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+Start an Android emulator from Android Studio first, then run:
 
-## Learn more
+```bash
+npm run android
+```
 
-To learn more about developing your project with Expo, look at the following resources:
+If Metro is already running:
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+```bash
+npm start
+```
 
-## Join the community
+Then press `a` in the Expo terminal.
 
-Join our community of developers creating universal apps.
+## Build an APK
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+```bash
+eas login
+eas build -p android --profile preview
+```
+
+Before building, make sure `.env` contains `GOOGLE_MAPS_API_KEY`. If the Maps tab or Add Dorm map closes the app in an APK, rebuild with a valid Maps SDK for Android key and the correct SHA-1 restriction.
+
+## Useful Scripts
+
+- `npm start` - Start the Expo dev server
+- `npm run android` - Start on Android emulator
+- `npm run web` - Start web build
+- `npm run lint` - Run Expo lint
+- `npm run verify-setup` - Check local setup files
+- `npm run setup-supabase` - Create/update `.env` with Supabase credentials
+
+## GitHub Workflow
+
+After making changes:
+
+```bash
+git status
+git add .
+git commit -m "Describe the change"
+git push origin main
+```
+
+If this is a new repository:
+
+```bash
+git remote add origin <github-repository-url>
+git branch -M main
+git push -u origin main
+```
+
+Do not commit `.env`, keystores, APK files, or Google Maps API keys.
