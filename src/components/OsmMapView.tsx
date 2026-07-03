@@ -1,4 +1,5 @@
-import { Platform, StyleSheet, View, type ViewStyle } from 'react-native';
+import Constants from 'expo-constants';
+import { Platform, StyleSheet, Text, View, type ViewStyle } from 'react-native';
 import MapView, {
   Marker,
   PROVIDER_GOOGLE,
@@ -7,6 +8,7 @@ import MapView, {
   type Region,
 } from 'react-native-maps';
 import { MAP_TILE_URL } from '@/constants/map';
+import { AppColors, BorderRadius } from '@/constants/theme';
 
 type OsmMapViewProps = Omit<MapViewProps, 'mapType'> & {
   style?: ViewStyle;
@@ -33,9 +35,29 @@ function WebMapFallback({ region, style }: { region: Region; style?: ViewStyle }
   );
 }
 
+function NativeMapUnavailable({ style }: { style?: ViewStyle }) {
+  return (
+    <View style={[styles.unavailableContainer, style]}>
+      <View style={styles.unavailablePanel}>
+        <Text style={styles.unavailableTitle}>Map unavailable</Text>
+        <Text style={styles.unavailableText}>
+          This Android build was created without a Google Maps API key. Add a key and rebuild the
+          APK to enable the map.
+        </Text>
+      </View>
+    </View>
+  );
+}
+
 export function OsmMapView({ style, region, children, ...props }: OsmMapViewProps) {
   if (Platform.OS === 'web') {
     return <WebMapFallback region={region} style={style} />;
+  }
+
+  const hasGoogleMapsApiKey = Boolean(Constants.expoConfig?.extra?.hasGoogleMapsApiKey);
+
+  if (Platform.OS === 'android' && !hasGoogleMapsApiKey) {
+    return <NativeMapUnavailable style={style} />;
   }
 
   return (
@@ -72,5 +94,34 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     borderRadius: 10,
     backgroundColor: '#111827',
+  },
+  unavailableContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 16,
+    backgroundColor: AppColors.surface,
+  },
+  unavailablePanel: {
+    width: '100%',
+    maxWidth: 360,
+    borderWidth: 1,
+    borderColor: AppColors.border,
+    borderRadius: BorderRadius.md,
+    padding: 16,
+    backgroundColor: AppColors.surfaceElevated,
+  },
+  unavailableTitle: {
+    marginBottom: 8,
+    color: AppColors.text,
+    fontSize: 16,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  unavailableText: {
+    color: AppColors.textSecondary,
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
   },
 });

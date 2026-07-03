@@ -7,6 +7,10 @@ const mapsApiKey =
 
 const expo = {
   ...appConfig.expo,
+  extra: {
+    ...appConfig.expo.extra,
+    hasGoogleMapsApiKey: Boolean(mapsApiKey),
+  },
   android: {
     ...appConfig.expo.android,
     config: {
