@@ -1,20 +1,34 @@
 import { useState, useCallback } from 'react';
-import { View, Text, Image, StyleSheet, ActivityIndicator, Button, FlatList, Pressable, Modal, TextInput, ScrollView, Platform, Linking, Alert } from 'react-native';
+import { View, Text, Image, StyleSheet, ActivityIndicator, Button, FlatList, Pressable, Modal, TextInput, ScrollView, Linking, Alert } from 'react-native';
 import { supabase } from '../../src/lib/supabase';
-import { useLocalSearchParams, useFocusEffect } from 'expo-router';
+import { useLocalSearchParams, useFocusEffect, useRouter } from 'expo-router';
 import { useAuth } from '../../src/hooks/useAuth';
+import * as ImagePicker from 'expo-image-picker';
+import { LeafletMapView } from '@/components/leaflet-map-view';
+import { useDiscovery } from '@/context/discovery-context';
+import { uploadImage, uploadPrivateImage } from '@/utils/imageUpload';
 
 export default function DormDetails() {
   const { dormId } = useLocalSearchParams<{ dormId: string }>();
   const { user } = useAuth();
+  const router = useRouter();
+  const { compareIds, toggleCompare } = useDiscovery();
   const [dorm, setDorm] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [reviews, setReviews] = useState<any[]>([]);
   const [newReview, setNewReview] = useState({ rating: 5, comment: '' });
+  const [reviewPhotos, setReviewPhotos] = useState<string[]>([]);
   const [reviewModalVisible, setReviewModalVisible] = useState(false);
   const [isOwner, setIsOwner] = useState(false);
   const [rentalRequestStatus, setRentalRequestStatus] = useState<string | null>(null);
+  const [requestDetails, setRequestDetails] = useState<any | null>(null);
   const [requestingRental, setRequestingRental] = useState(false);
+  const [rentalModalVisible, setRentalModalVisible] = useState(false);
+  const [idDocumentUrl, setIdDocumentUrl] = useState('');
+  const [paymentProofUrl, setPaymentProofUrl] = useState('');
+  const [extraDetails, setExtraDetails] = useState('');
+  const [requestType, setRequestType] = useState<'rental' | 'reservation'>('rental');
+  const [contractAgreed, setContractAgreed] = useState(false);
 
   const loadDorm = useCallback(async () => {
     if (!dormId) return;
@@ -34,12 +48,14 @@ export default function DormDetails() {
       const ownerCheck = user?.id === dormData.owner_id;
 
       // Get reviews for this dorm
-      const { data: reviewsData, error: reviewsError } = await supabase
-        .from('dorm_reviews')
-        .select('*, profiles!inner(full_name, username, avatar_url)')
-        .eq('dorm_id', dormId)
-        .order('created_at', { ascending: false });
+      let { data: reviewsData, error: reviewsError } = await supabase.rpc('get_public_dorm_reviews', { p_dorm_id: dormId });
+      if (reviewsError) {
+        const fallback = await supabase.from('dorm_reviews').select('*').eq('dorm_id', dormId).order('created_at', { ascending: false });
+        reviewsData = fallback.data;
+        reviewsError = fallback.error;
+      }
 
+      if (reviewsError) throw reviewsError;
       setDorm(dormData);
       setIsOwner(ownerCheck);
       setReviews(reviewsData || []);
@@ -47,7 +63,7 @@ export default function DormDetails() {
       if (user && !ownerCheck) {
         const { data: reqData, error: reqError } = await supabase
           .from('rental_requests')
-          .select('status')
+          .select('*')
           .eq('dorm_id', dormId)
           .eq('user_id', user.id)
           .order('created_at', { ascending: false })
@@ -56,8 +72,10 @@ export default function DormDetails() {
 
         if (!reqError && reqData) {
           setRentalRequestStatus(reqData.status);
+          setRequestDetails(reqData);
         } else {
           setRentalRequestStatus(null);
+          setRequestDetails(null);
         }
       }
     } catch (error) {
@@ -73,25 +91,6 @@ export default function DormDetails() {
       loadDorm();
     }, [loadDorm])
   );
-
-  const handleFavorite = async () => {
-    if (!dorm || !dormId) return;
-    try {
-      const { error } = await supabase
-        .from('dorms')
-        .update({ is_featured: !dorm.is_featured })
-        .eq('dorm_id', dormId);
-
-      if (error) throw error;
-
-      setDorm((prev: any) => ({
-        ...prev,
-        is_featured: !prev.is_featured,
-      }));
-    } catch (error) {
-      console.error('Error updating favorite status:', error);
-    }
-  };
 
   const handleToggleAvailability = async () => {
     if (!dorm || !dormId || !isOwner) return;
@@ -112,15 +111,28 @@ export default function DormDetails() {
     }
   };
 
-  const handleRequestRental = async () => {
+  const handleRequestRental = (type: 'rental' | 'reservation' = 'rental') => {
     if (!user) {
       Alert.alert('Sign In Required', 'Please sign in to request renting this dormitory.');
       return;
     }
-    if (!dorm) return;
+    setRequestType(type);
+    setRentalModalVisible(true);
+  };
+
+  const submitRentalRequest = async () => {
+    if (!user || !dorm) return;
+
+    if (!idDocumentUrl.trim()) {
+      Alert.alert('Government ID required', 'Provide the secure ID upload URL before submitting.');
+      return;
+    }
 
     setRequestingRental(true);
     try {
+      const idPath = idDocumentUrl.startsWith('file:') || idDocumentUrl.startsWith('content:')
+        ? await uploadPrivateImage(`${user.id}/government-id/${Date.now()}.${idDocumentUrl.split('.').pop() || 'jpg'}`, idDocumentUrl)
+        : idDocumentUrl.trim();
       const { data: existingReq } = await supabase
         .from('rental_requests')
         .select('request_id')
@@ -131,7 +143,15 @@ export default function DormDetails() {
       if (existingReq) {
         const { error } = await supabase
           .from('rental_requests')
-          .update({ status: 'pending', updated_at: new Date().toISOString() })
+          .update({
+            status: 'pending',
+            renter_gov_id_url: idPath,
+            payment_proof_url: null,
+            message: extraDetails.trim().slice(0, 1000),
+            request_type: requestType,
+            contract_agreed: false,
+            updated_at: new Date().toISOString()
+          })
           .eq('request_id', existingReq.request_id);
 
         if (error) throw error;
@@ -143,25 +163,60 @@ export default function DormDetails() {
             user_id: user.id,
             owner_id: dorm.owner_id,
             status: 'pending',
+            renter_gov_id_url: idPath,
+            message: extraDetails.trim().slice(0, 1000),
+            request_type: requestType,
           });
 
         if (error) throw error;
       }
 
-      // Create notification for the owner
-      await supabase.from('notifications').insert({
-        user_id: dorm.owner_id,
-        title: 'New Rental Request',
-        message: `${user.user_metadata?.full_name || user.email || 'A user'} has requested to rent your dormitory: ${dorm.name}.`,
-        type: 'rental_request',
-        related_dorm_id: dormId,
-      });
-
       setRentalRequestStatus('pending');
-      Alert.alert('Success', 'Your rental request has been submitted to the dorm owner!');
+      setRentalModalVisible(false);
+      setIdDocumentUrl('');
+      setExtraDetails('');
+      Alert.alert('Request submitted', `The owner will review your ${requestType} request and ID before sending payment instructions.`);
     } catch (error: any) {
       console.error('Error requesting rental:', error);
       Alert.alert('Error', error.message || 'Failed to submit rental request.');
+    } finally {
+      setRequestingRental(false);
+    }
+  };
+
+  const submitPaymentProof = async () => {
+    if (!user || !requestDetails?.request_id) return;
+    if (!contractAgreed || !paymentProofUrl.trim()) {
+      Alert.alert('Complete the payment step', 'Agree to the contract and provide a payment proof URL.');
+      return;
+    }
+
+    setRequestingRental(true);
+    try {
+      const paymentPath = paymentProofUrl.startsWith('file:') || paymentProofUrl.startsWith('content:')
+        ? await uploadPrivateImage(`${user.id}/payment-proof/${Date.now()}.${paymentProofUrl.split('.').pop() || 'jpg'}`, paymentProofUrl)
+        : paymentProofUrl.trim();
+      const { error } = await supabase
+        .from('rental_requests')
+        .update({
+          payment_proof_url: paymentPath,
+          contract_agreed: true,
+          payment_status: 'pending_verification',
+          status: 'payment_submitted',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('request_id', requestDetails.request_id)
+        .eq('user_id', user.id);
+      if (error) throw error;
+
+      setRentalRequestStatus('payment_submitted');
+      setRequestDetails((current: any) => ({ ...current, status: 'payment_submitted', contract_agreed: true }));
+      setRentalModalVisible(false);
+      setPaymentProofUrl('');
+      setContractAgreed(false);
+      Alert.alert('Payment proof submitted', 'The admin and dorm owner can now review the proof.');
+    } catch (error: any) {
+      Alert.alert('Upload failed', error.message || 'Could not submit payment proof.');
     } finally {
       setRequestingRental(false);
     }
@@ -220,6 +275,8 @@ export default function DormDetails() {
     }
 
     try {
+      const photos: string[] = [];
+      for (const uri of reviewPhotos) photos.push(await uploadImage(`${user.id}/reviews/${dormId}/${Date.now()}-${photos.length}.${uri.split('.').pop() || 'jpg'}`, uri));
       const { error } = await supabase
         .from('dorm_reviews')
         .insert({
@@ -227,25 +284,48 @@ export default function DormDetails() {
           user_id: user.id,
           rating: newReview.rating,
           comment: newReview.comment,
+          photos,
         });
 
       if (error) throw error;
 
       setReviewModalVisible(false);
       setNewReview({ rating: 5, comment: '' });
+      setReviewPhotos([]);
 
       // Refresh reviews
-      const { data } = await supabase
-        .from('dorm_reviews')
-        .select('*, profiles!inner(full_name, username, avatar_url)')
-        .eq('dorm_id', dormId)
-        .order('created_at', { ascending: false });
+      const { data } = await supabase.rpc('get_public_dorm_reviews', { p_dorm_id: dormId });
 
       setReviews(data || []);
     } catch (error) {
       console.error('Error submitting review:', error);
       alert('Failed to submit review');
     }
+  };
+
+  const pickReviewPhotos = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsMultipleSelection: true, selectionLimit: 4, quality: 0.75 });
+    if (!result.canceled) setReviewPhotos(result.assets.map((asset) => asset.uri).slice(0, 4));
+  };
+
+  const pickTransactionImage = async (kind: 'id' | 'payment') => {
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: false, quality: 0.8 });
+    if (!result.canceled) {
+      if (kind === 'id') setIdDocumentUrl(result.assets[0].uri);
+      else setPaymentProofUrl(result.assets[0].uri);
+    }
+  };
+
+  const openExactMap = async () => {
+    const geo = `geo:${dorm.latitude},${dorm.longitude}?q=${dorm.latitude},${dorm.longitude}(${encodeURIComponent(dorm.name)})`;
+    if (await Linking.canOpenURL(geo)) await Linking.openURL(geo);
+    else await Linking.openURL(`https://www.openstreetmap.org/?mlat=${dorm.latitude}&mlon=${dorm.longitude}#map=18/${dorm.latitude}/${dorm.longitude}`);
+  };
+
+  const addToCompare = () => {
+    const result = compareIds.includes(dorm.dorm_id) ? 'added' : toggleCompare(dorm.dorm_id);
+    if (result === 'limit') Alert.alert('Comparison full', 'Remove one dorm before adding this property.');
+    else router.push('/(tabs)/compare');
   };
 
   if (loading) {
@@ -292,40 +372,16 @@ export default function DormDetails() {
         <Text style={styles.dormName}>{dorm.name}</Text>
         <View style={styles.priceAndFavorite}>
           <Text style={styles.dormPrice}>₱{dorm.price}/month</Text>
-          <Pressable onPress={handleFavorite} style={styles.favoriteButton}>
-            {dorm.is_featured ? (
-              <Text style={{ color: '#FF0000', fontWeight: 'bold' }}>★</Text>
-            ) : (
-              <Text style={{ color: '#CCCCCC', fontSize: 24 }}>☆</Text>
-            )}
-          </Pressable>
+          {dorm.lgu_certified ? <View style={styles.certBadge}><Text style={styles.certText}>✓ LGU Certified</Text></View> : null}
         </View>
         <Text style={styles.dormAddress}>{dorm.address}</Text>
-        <Pressable 
-          style={styles.navigationButton}
-          onPress={() => {
-            const lat = dorm.latitude;
-            const lon = dorm.longitude;
-            const url = Platform.select({
-              ios: `maps://app?daddr=${lat},${lon}`,
-              android: `google.navigation:q=${lat},${lon}`,
-            });
+        <View style={styles.detailMap}><LeafletMapView dorms={[{ ...dorm, rating_average: 0, rating_count: reviews.length, distance_km: null, ranking_score: 0, max_tenants: dorm.max_tenants || 1, occupied_tenants: dorm.occupied_tenants || 0, available_slots: Math.max(0, (dorm.max_tenants || 1) - (dorm.occupied_tenants || 0)) }]} center={{ latitude: Number(dorm.latitude), longitude: Number(dorm.longitude) }} radiusKm={1} userLocation={null} showAnalytics={false} onSelectDorm={openExactMap} /></View>
+        <Pressable style={styles.navigationButton} onPress={openExactMap}><Text style={styles.navigationButtonText}>Open exact location in Maps</Text></Pressable>
 
-            if (url) {
-              Linking.canOpenURL(url).then((supported) => {
-                if (supported) {
-                  Linking.openURL(url);
-                } else {
-                  Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}`);
-                }
-              });
-            }
-          }}
-        >
-          <Text style={styles.navigationButtonText}>🚗 Get Directions (Open Map)</Text>
-        </Pressable>
+        {!isOwner && <View style={styles.primaryActions}><Pressable onPress={addToCompare} style={styles.actionSecondary}><Text style={styles.actionSecondaryText}>Compare</Text></Pressable><Pressable disabled={!dorm.available} onPress={() => handleRequestRental('reservation')} style={styles.actionSecondary}><Text style={styles.actionSecondaryText}>Reserve</Text></Pressable><Pressable disabled={!dorm.available} onPress={() => handleRequestRental('rental')} style={styles.actionPrimary}><Text style={styles.actionPrimaryText}>Request Rental</Text></Pressable></View>}
+        {(dorm.contact_phone || dorm.contact_email) && <Pressable onPress={() => dorm.contact_phone ? Linking.openURL(`tel:${dorm.contact_phone.replace(/[^+0-9]/g, '')}`) : Linking.openURL(`mailto:${dorm.contact_email}`)} style={styles.contactCard}><Text style={styles.detailLabel}>Owner contact</Text><Text style={styles.contactValue}>{dorm.contact_phone || dorm.contact_email}</Text></Pressable>}
 
-        {!isOwner && (
+        {false && !isOwner && (
           <Pressable
             style={[
               styles.rentButton,
@@ -334,11 +390,11 @@ export default function DormDetails() {
               rentalRequestStatus === 'accepted' && styles.rentButtonAccepted,
               rentalRequestStatus === 'declined' && styles.rentButtonDeclined,
             ]}
-            onPress={rentalRequestStatus === 'accepted' ? handleCancelRental : handleRequestRental}
+            onPress={['approved', 'reserved', 'accepted'].includes(rentalRequestStatus || '') ? handleCancelRental : () => handleRequestRental('rental')}
             disabled={
               requestingRental ||
-              (dorm.available === false && rentalRequestStatus !== 'accepted') ||
-              rentalRequestStatus === 'pending'
+              (dorm.available === false && !['approved', 'reserved', 'accepted'].includes(rentalRequestStatus || '')) ||
+              ['pending', 'payment_submitted'].includes(rentalRequestStatus || '')
             }
           >
             {requestingRental ? (
@@ -346,7 +402,10 @@ export default function DormDetails() {
             ) : (
               <Text style={styles.rentButtonText}>
                 {dorm.available === false && rentalRequestStatus !== 'accepted' && 'Dorm Unavailable'}
-                {rentalRequestStatus === 'accepted' && 'Rental Accepted (Tap to Cancel)'}
+                {['approved', 'accepted'].includes(rentalRequestStatus || '') && 'Rental Confirmed (Tap to Cancel)'}
+                {rentalRequestStatus === 'reserved' && 'Reserved (Tap to Start Refund)'}
+                {rentalRequestStatus === 'awaiting_payment' && 'Review Contract & Pay'}
+                {rentalRequestStatus === 'payment_submitted' && 'Payment Verification Pending'}
                 {dorm.available && rentalRequestStatus === null && 'Request to Rent'}
                 {dorm.available && rentalRequestStatus === 'pending' && 'Request Pending'}
                 {dorm.available && rentalRequestStatus === 'declined' && 'Request Declined (Retry)'}
@@ -356,6 +415,11 @@ export default function DormDetails() {
         )}
 
         <View style={styles.detailsSection}>
+          <View style={styles.detailRow}><Text style={styles.detailLabel}>Reservation Fee:</Text><Text style={styles.detailValue}>₱{Number(dorm.reservation_fee || 0).toLocaleString('en-PH')}</Text></View>
+          <View style={styles.detailRow}><Text style={styles.detailLabel}>Availability:</Text><Text style={styles.detailValue}>{Math.max(0, (dorm.max_tenants || 1) - (dorm.occupied_tenants || 0))} of {dorm.max_tenants || 1} tenant slots left</Text></View>
+          <View style={styles.detailRow}><Text style={styles.detailLabel}>Owner:</Text><Text style={styles.detailValue}>{dorm.owner_display_name || 'Verified listing owner'}</Text></View>
+          <View style={styles.detailRow}><Text style={styles.detailLabel}>Overall Rating:</Text><Text style={styles.detailValue}>{reviews.length ? `${(reviews.reduce((sum: number, item: any) => sum + Number(item.rating || 0), 0) / reviews.length).toFixed(1)} (${reviews.length} reviews)` : 'New listing'}</Text></View>
+          <View style={styles.detailRow}><Text style={styles.detailLabel}>Room Type:</Text><Text style={styles.detailValue}>{dorm.room_type || 'Not specified'}</Text></View>
           <View style={styles.detailRow}>
             <Text style={styles.detailLabel}>Gender Policy:</Text>
             <Text style={styles.detailValue}>{dorm.gender_policy}</Text>
@@ -376,6 +440,8 @@ export default function DormDetails() {
                     : 'Not specified'}
                 </Text>
               </View>
+              <View style={styles.detailRow}><Text style={styles.detailLabel}>House Rules:</Text><Text style={styles.detailValue}>{Array.isArray(dorm.house_rules) && dorm.house_rules.length ? dorm.house_rules.join(', ') : 'No additional rules'}</Text></View>
+              <View style={styles.detailRow}><Text style={styles.detailLabel}>Parking:</Text><Text style={styles.detailValue}>{dorm.parking_info || 'None listed'}</Text></View>
               <View style={styles.detailRow}>
                 <Text style={styles.detailLabel}>Curfew:</Text>
                 <Text style={styles.detailValue}>
@@ -429,21 +495,21 @@ export default function DormDetails() {
                     <View style={styles.reviewItem}>
                       <View style={styles.reviewHeader}>
                         <View style={styles.reviewerInfo}>
-                          {item.profiles?.avatar_url && typeof item.profiles.avatar_url === 'string' && item.profiles.avatar_url.length > 0 ? (
+                          {item.reviewer_avatar_url ? (
                             <Image
-                              source={{ uri: item.profiles.avatar_url }}
+                              source={{ uri: item.reviewer_avatar_url }}
                               style={styles.avatar}
                             />
                           ) : (
                             <View style={styles.avatarPlaceholder}>
                               <Text style={styles.avatarText}>
-                                {(item.profiles?.full_name || item.profiles?.username || 'A').charAt(0)}
+                                {(item.reviewer_name || 'R').charAt(0)}
                               </Text>
                             </View>
                           )}
                           <View>
                             <Text style={styles.reviewerName}>
-                              {item.profiles?.full_name || item.profiles?.username || 'Anonymous'}
+                              {item.reviewer_name || 'Room Scout renter'} {item.verified_renter ? '✓' : ''}
                             </Text>
                             <Text style={styles.reviewDate}>
                               {new Date(item.created_at).toLocaleDateString()}
@@ -468,6 +534,7 @@ export default function DormDetails() {
                         </View>
                       </View>
                       <Text style={styles.reviewComment}>{item.comment}</Text>
+                      {Array.isArray(item.photos) && item.photos.length > 0 ? <ScrollView horizontal showsHorizontalScrollIndicator={false}>{item.photos.map((photo: string) => <Image key={photo} source={{ uri: photo }} style={styles.reviewPhoto} />)}</ScrollView> : null}
                     </View>
                   )}
                   contentContainerStyle={styles.reviewsList}
@@ -507,10 +574,74 @@ export default function DormDetails() {
                 value={newReview.comment}
                 onChangeText={(text) => setNewReview((prev: any) => ({ ...prev, comment: text }))}
               />
+              <Pressable onPress={pickReviewPhotos} style={styles.photoButton}><Text style={styles.photoButtonText}>{reviewPhotos.length ? `${reviewPhotos.length} photo(s) selected` : 'Add review photos'}</Text></Pressable>
               <View style={styles.modalActions}>
                 <Button title="Cancel" onPress={() => setReviewModalVisible(false)} />
                 <Button title="Submit" onPress={handleSubmitReview} />
               </View>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Rental Request Modal */}
+        <Modal
+          visible={rentalModalVisible}
+          transparent={true}
+          animationType="slide"
+          onRequestClose={() => setRentalModalVisible(false)}
+        >
+          <View style={styles.modalBackground}>
+            <View style={styles.modalContent}>
+              <ScrollView showsVerticalScrollIndicator={false}>
+                {rentalRequestStatus === 'awaiting_payment' ? (
+                  <>
+                    <Text style={styles.modalTitle}>Review contract & payment</Text>
+                    <Text style={styles.inputLabel}>Required amount</Text>
+                    <Text style={{ fontSize: 22, fontWeight: '700', marginBottom: 12 }}>₱{Number(requestDetails?.required_amount || 0).toLocaleString('en-PH')}</Text>
+                    {requestDetails?.owner_payment_qr_url ? (
+                      <View style={styles.qrContainer}>
+                        <Image source={{ uri: requestDetails.owner_payment_qr_url }} style={styles.qrImage} />
+                        <Text style={styles.qrText}>Owner payment QR</Text>
+                      </View>
+                    ) : <Text style={styles.qrText}>The owner has not attached a QR yet.</Text>}
+                    <Text style={styles.inputLabel}>Contract</Text>
+                    <Pressable onPress={() => requestDetails?.contract_url && Linking.openURL(requestDetails.contract_url)}>
+                      <Text style={{ color: '#2563eb', marginBottom: 12 }}>{requestDetails?.contract_url ? 'Open contract document' : 'Contract link unavailable'}</Text>
+                    </Pressable>
+                    <Pressable onPress={() => setContractAgreed((value) => !value)} style={{ padding: 12, borderWidth: 1, borderColor: contractAgreed ? '#16a34a' : '#d1d5db', borderRadius: 8, marginBottom: 12 }}>
+                      <Text>{contractAgreed ? '✓ ' : ''}I reviewed and agree to the contract</Text>
+                    </Pressable>
+                    <Text style={styles.inputLabel}>Payment proof</Text>
+                    <Pressable onPress={() => pickTransactionImage('payment')} style={styles.photoButton}><Text style={styles.photoButtonText}>{paymentProofUrl ? 'Change selected receipt' : 'Choose receipt image'}</Text></Pressable>
+                    <View style={styles.modalActions}>
+                      <Button title="Cancel" onPress={() => setRentalModalVisible(false)} color="#999" />
+                      <Button title="Submit Payment Proof" onPress={submitPaymentProof} disabled={requestingRental} />
+                    </View>
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.modalTitle}>Submit a request</Text>
+                    <Text style={styles.inputLabel}>Request type</Text>
+                    <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
+                      {(['rental', 'reservation'] as const).map((type) => (
+                        <Pressable key={type} onPress={() => setRequestType(type)} style={{ flex: 1, padding: 11, borderRadius: 8, alignItems: 'center', backgroundColor: requestType === type ? '#2563eb' : '#e5e7eb' }}>
+                          <Text style={{ color: requestType === type ? '#fff' : '#111', fontWeight: '700', textTransform: 'capitalize' }}>{type}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                    {requestType === 'reservation' && <Text style={{ marginBottom: 12, color: '#6b7280' }}>Reservation fee: ₱{Number(dorm.reservation_fee || 0).toLocaleString('en-PH')} (confirmed by owner)</Text>}
+                    <Text style={styles.inputLabel}>Government ID</Text>
+                    <Pressable onPress={() => pickTransactionImage('id')} style={styles.photoButton}><Text style={styles.photoButtonText}>{idDocumentUrl ? 'Change selected ID image' : 'Choose ID image securely'}</Text></Pressable>
+                    <Text style={styles.inputLabel}>Move-in details or message (optional)</Text>
+                    <TextInput style={[styles.commentInput, { height: 80 }]} maxLength={1000} placeholder="Move-in date and questions for the owner" value={extraDetails} onChangeText={setExtraDetails} multiline textAlignVertical="top" />
+                    <Text style={{ color: '#6b7280', fontSize: 12, marginBottom: 12 }}>Payment is requested only after the owner accepts and sends a QR and contract.</Text>
+                    <View style={styles.modalActions}>
+                      <Button title="Cancel" onPress={() => setRentalModalVisible(false)} color="#999" />
+                      <Button title="Submit Request" onPress={submitRentalRequest} disabled={requestingRental} />
+                    </View>
+                  </>
+                )}
+              </ScrollView>
             </View>
           </View>
         </Modal>
@@ -521,7 +652,7 @@ export default function DormDetails() {
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: '#fff',
+    backgroundColor: '#f8fafc',
     ...StyleSheet.absoluteFill as any,
   },
   imageContainer: {
@@ -534,6 +665,7 @@ const styles = StyleSheet.create({
   },
   infoContainer: {
     padding: 16,
+    backgroundColor: '#f8fafc',
   },
   dormName: {
     fontSize: 24,
@@ -560,8 +692,8 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   detailsSection: {
-    backgroundColor: '#f8f9fa',
-    borderRadius: 8,
+    backgroundColor: '#fff',
+    borderRadius: 18,
     padding: 16,
     marginBottom: 16,
   },
@@ -631,10 +763,10 @@ const styles = StyleSheet.create({
   },
   reviewItem: {
     backgroundColor: '#fff',
-    borderRadius: 8,
+    borderRadius: 16,
     padding: 12,
     marginBottom: 12,
-    elevation: 2,
+    boxShadow: '0 5px 18px rgba(15,23,42,0.08)',
   },
   reviewHeader: {
     flexDirection: 'row',
@@ -751,6 +883,29 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     padding: 12,
     marginBottom: 16,
+    fontSize: 16,
+  },
+  inputLabel: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 8,
+    color: '#333',
+  },
+  qrContainer: {
+    alignItems: 'center',
+    marginBottom: 16,
+    padding: 16,
+    backgroundColor: '#f8f9fa',
+    borderRadius: 8,
+  },
+  qrImage: {
+    width: 150,
+    height: 150,
+    marginBottom: 8,
+  },
+  qrText: {
+    fontSize: 14,
+    color: '#666',
   },
   modalActions: {
     flexDirection: 'row',
@@ -775,6 +930,19 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
   },
+  detailMap: { height: 210, overflow: 'hidden', borderRadius: 18, marginBottom: 10, borderWidth: 1, borderColor: '#dbeafe' },
+  certBadge: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: '#dcfce7' },
+  certText: { color: '#15803d', fontSize: 11, fontWeight: '800' },
+  primaryActions: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+  actionSecondary: { flex: 1, minHeight: 46, alignItems: 'center', justifyContent: 'center', borderRadius: 14, borderWidth: 1, borderColor: '#2563eb', backgroundColor: '#eff6ff' },
+  actionSecondaryText: { color: '#1d4ed8', fontSize: 12, fontWeight: '800' },
+  actionPrimary: { flex: 1.35, minHeight: 46, alignItems: 'center', justifyContent: 'center', borderRadius: 14, backgroundColor: '#2563eb' },
+  actionPrimaryText: { color: '#fff', fontSize: 12, fontWeight: '800' },
+  contactCard: { padding: 13, marginBottom: 12, borderRadius: 14, backgroundColor: '#f8fafc', borderWidth: 1, borderColor: '#e2e8f0' },
+  contactValue: { color: '#2563eb', fontSize: 15, fontWeight: '700', paddingTop: 4 },
+  reviewPhoto: { width: 112, height: 84, borderRadius: 10, marginTop: 9, marginRight: 8 },
+  photoButton: { padding: 11, marginBottom: 14, borderRadius: 10, alignItems: 'center', borderWidth: 1, borderColor: '#93c5fd', backgroundColor: '#eff6ff' },
+  photoButtonText: { color: '#1d4ed8', fontWeight: '700' },
   rentButton: {
     backgroundColor: '#10b981',
     paddingVertical: 14,

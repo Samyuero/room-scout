@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, FlatList, ActivityIndicator, Pressable, Alert, Modal, TextInput, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, FlatList, ActivityIndicator, Pressable, Alert, Modal, TextInput, ScrollView, Linking, Image } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '../src/lib/supabase';
 import { useAuth } from '../src/hooks/useAuth';
 import { useRouter } from 'expo-router';
+import { getPrivateDocumentUrl, uploadImage } from '@/utils/imageUpload';
 
 export default function OwnerPanelScreen() {
   const router = useRouter();
@@ -24,6 +26,55 @@ export default function OwnerPanelScreen() {
   const [offlinePhone, setOfflinePhone] = useState('');
   const [selectedDormId, setSelectedDormId] = useState('');
   const [addingRenter, setAddingRenter] = useState(false);
+  const [acceptingRequest, setAcceptingRequest] = useState<any | null>(null);
+  const [requiredAmount, setRequiredAmount] = useState('');
+  const [ownerQrUrl, setOwnerQrUrl] = useState('');
+  const [contractUrl, setContractUrl] = useState('');
+  const [uploadingAcceptance, setUploadingAcceptance] = useState(false);
+
+  const pickQrImage = async () => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Denied', 'Gallery access is required to pick the payment QR image.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: false,
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        setOwnerQrUrl(result.assets[0].uri);
+      }
+    } catch (err) {
+      Alert.alert('Error', 'Failed to pick QR code image.');
+    }
+  };
+
+  const pickContractImage = async () => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Denied', 'Gallery access is required to pick the contract photo.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: false,
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        setContractUrl(result.assets[0].uri);
+      }
+    } catch (err) {
+      Alert.alert('Error', 'Failed to pick contract document photo.');
+    }
+  };
 
   const checkOwnerRole = async () => {
     if (!user) {
@@ -32,14 +83,15 @@ export default function OwnerPanelScreen() {
       return;
     }
     try {
+      // Check if the user exists in the owners table
       const { data, error } = await supabase
-        .from('profiles')
-        .select('role')
-        .eq('profile_id', user.id)
-        .single();
+        .from('owners')
+        .select('owner_id')
+        .eq('owner_id', user.id)
+        .maybeSingle();
 
       if (error) throw error;
-      setIsOwner(data?.role === 'owner' || data?.role === 'admin');
+      setIsOwner(!!data);
     } catch (err) {
       console.error('Error checking owner role:', err);
       setIsOwner(false);
@@ -135,9 +187,9 @@ export default function OwnerPanelScreen() {
       if (activeTab === 'requests') {
         const { data: requestsData, error: reqError } = await supabase
           .from('rental_requests')
-          .select('*, dorms:dorm_id (name)')
+          .select('*, dorms:dorm_id (name, price, reservation_fee)')
           .eq('owner_id', user!.id)
-          .eq('status', 'pending')
+          .in('status', ['pending', 'payment_submitted', 'refund_requested'])
           .order('created_at', { ascending: false });
 
         if (reqError) throw reqError;
@@ -147,21 +199,21 @@ export default function OwnerPanelScreen() {
           return;
         }
 
-        // Get unique user IDs and fetch profiles
+        // Get unique user IDs and fetch renter profiles
         const userIds = [...new Set(requestsData.map((r: any) => r.user_id))];
-        const { data: profilesData, error: profError } = await supabase
-          .from('profiles')
-          .select('profile_id, full_name, username, avatar_url')
-          .in('profile_id', userIds.length > 0 ? userIds : ['00000000-0000-0000-0000-000000000000']);
+        const { data: rentersData, error: profError } = await supabase
+          .from('renters')
+          .select('renter_id, full_name, username, avatar_url')
+          .in('renter_id', userIds.length > 0 ? userIds : ['00000000-0000-0000-0000-000000000000']);
 
         if (profError) throw profError;
 
-        const profileMap: Record<string, any> = {};
-        (profilesData || []).forEach((p: any) => { profileMap[p.profile_id] = p; });
+        const renterMap: Record<string, any> = {};
+        (rentersData || []).forEach((p: any) => { renterMap[p.renter_id] = p; });
 
         const merged = requestsData.map((req: any) => ({
           ...req,
-          profiles: profileMap[req.user_id] || null,
+          profiles: renterMap[req.user_id] || null,
         }));
 
         setRentalRequests(merged);
@@ -170,7 +222,7 @@ export default function OwnerPanelScreen() {
         try {
           const { data: rentalsData, error: rentError } = await supabase
             .from('rentals')
-            .select('*, dorms!inner(name, owner_id), profiles(profile_id, full_name, username, avatar_url)')
+            .select('*, dorms!inner(name, owner_id), renters(renter_id, full_name, username, avatar_url)')
             .eq('dorms.owner_id', user!.id)
             .eq('status', 'active')
             .order('start_date', { ascending: false });
@@ -201,25 +253,25 @@ export default function OwnerPanelScreen() {
           }
 
           const userIds = [...new Set(requestsData.map((r: any) => r.user_id))];
-          const { data: profilesData, error: profError } = await supabase
-            .from('profiles')
-            .select('profile_id, full_name, username, avatar_url')
-            .in('profile_id', userIds.length > 0 ? userIds : ['00000000-0000-0000-0000-000000000000']);
+          const { data: rentersData, error: profError } = await supabase
+            .from('renters')
+            .select('id, full_name, username, avatar_url')
+            .in('id', userIds.length > 0 ? userIds : ['00000000-0000-0000-0000-000000000000']);
 
           if (profError) throw profError;
 
-          const profileMap: Record<string, any> = {};
-          (profilesData || []).forEach((p: any) => { profileMap[p.profile_id] = p; });
+          const renterMap: Record<string, any> = {};
+          (rentersData || []).forEach((p: any) => { renterMap[p.id] = p; });
 
           const merged = requestsData.map((req: any) => ({
             ...req,
             dorm_id: req.dorm_id,
             user_id: req.user_id,
-            renter_name: profileMap[req.user_id]?.full_name || 'Registered User',
+            renter_name: renterMap[req.user_id]?.full_name || 'Registered User',
             renter_phone: null,
             start_date: req.updated_at,
             dorms: req.dorms,
-            profiles: profileMap[req.user_id] || null,
+            profiles: renterMap[req.user_id] || null,
           }));
 
           setTenants(merged);
@@ -239,9 +291,18 @@ export default function OwnerPanelScreen() {
   }, [isOwner, activeTab]);
 
   const handleDecision = async (requestId: string, approve: boolean, userId: string, dormName: string, dormId: string) => {
+    if (approve) {
+      const request = rentalRequests.find((item) => item.request_id === requestId);
+      setAcceptingRequest(request);
+      setRequiredAmount(String(request?.request_type === 'reservation' ? request?.dorms?.reservation_fee || '' : request?.dorms?.price || ''));
+      setOwnerQrUrl('');
+      setContractUrl('');
+      return;
+    }
+
     setActionLoading(requestId);
     try {
-      const newStatus = approve ? 'accepted' : 'declined';
+      const newStatus = 'rejected';
       
       const { error } = await supabase
         .from('rental_requests')
@@ -250,33 +311,64 @@ export default function OwnerPanelScreen() {
 
       if (error) throw error;
 
-      if (approve) {
-        const { error: dormError } = await supabase
-          .from('dorms')
-          .update({ available: false })
-          .eq('dorm_id', dormId);
-        
-        if (dormError) throw dormError;
-      }
-
-      // Create notification for the user
-      await supabase.from('notifications').insert({
-        user_id: userId,
-        title: approve ? 'Rental Request Accepted' : 'Rental Request Declined',
-        message: approve 
-          ? `Congratulations! Your request to rent "${dormName}" has been accepted by the owner.` 
-          : `Sorry, your request to rent "${dormName}" was declined by the owner.`,
-        type: approve ? 'rental_accepted' : 'rental_declined',
-        related_dorm_id: dormId,
-        related_request_id: requestId,
-      });
-
       Alert.alert('Success', `Rental request has been ${newStatus}.`);
       setRentalRequests(prev => prev.filter(item => item.request_id !== requestId));
     } catch (err: any) {
       Alert.alert('Error', err.message);
     } finally {
       setActionLoading(null);
+    }
+  };
+
+  const submitAcceptance = async () => {
+    if (!acceptingRequest) return;
+    const amount = Number(requiredAmount);
+    if (!Number.isFinite(amount) || amount <= 0 || !ownerQrUrl.trim() || !contractUrl.trim()) {
+      Alert.alert('Missing acceptance details', 'Please enter a valid amount and select both the QR photo and Contract photo from gallery.');
+      return;
+    }
+
+    setActionLoading(acceptingRequest.request_id);
+    setUploadingAcceptance(true);
+    try {
+      let finalQrUrl = ownerQrUrl.trim();
+      let finalContractUrl = contractUrl.trim();
+
+      // Upload QR photo to Supabase Storage if selected from local gallery
+      if (ownerQrUrl.startsWith('file:') || ownerQrUrl.startsWith('content:')) {
+        const ext = ownerQrUrl.split('.').pop()?.toLowerCase() || 'jpg';
+        const fileName = `${user!.id}/qrcodes/${Date.now()}.${ext}`;
+        finalQrUrl = await uploadImage(fileName, ownerQrUrl);
+      }
+
+      // Upload Contract photo to Supabase Storage if selected from local gallery
+      if (contractUrl.startsWith('file:') || contractUrl.startsWith('content:')) {
+        const ext = contractUrl.split('.').pop()?.toLowerCase() || 'jpg';
+        const fileName = `${user!.id}/contracts/${Date.now()}.${ext}`;
+        finalContractUrl = await uploadImage(fileName, contractUrl);
+      }
+
+      const { error } = await supabase
+        .from('rental_requests')
+        .update({
+          status: 'awaiting_payment',
+          required_amount: amount,
+          owner_payment_qr_url: finalQrUrl,
+          contract_url: finalContractUrl,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('request_id', acceptingRequest.request_id)
+        .eq('owner_id', user!.id);
+      if (error) throw error;
+
+      setRentalRequests((current) => current.filter((item) => item.request_id !== acceptingRequest.request_id));
+      setAcceptingRequest(null);
+      Alert.alert('Payment step opened', 'The renter can now review the contract, scan your QR, and submit proof.');
+    } catch (err: any) {
+      Alert.alert('Could not accept request', err.message || 'Please try again.');
+    } finally {
+      setActionLoading(null);
+      setUploadingAcceptance(false);
     }
   };
 
@@ -388,8 +480,24 @@ export default function OwnerPanelScreen() {
         <Text style={styles.cardSubtitle}>@{item.profiles?.username || 'username'}</Text>
         <Text style={styles.cardDorm}>Dormitory: <Text style={styles.boldText}>{item.dorms?.name}</Text></Text>
         <Text style={styles.cardDetail}>Requested on: {new Date(item.created_at).toLocaleDateString()}</Text>
+
+        {/* New Document Fields */}
+        <View style={styles.documentContainer}>
+          <Text style={styles.documentLabel}>Valid ID:</Text>
+          <Pressable disabled={!item.renter_gov_id_url} onPress={async () => Linking.openURL(await getPrivateDocumentUrl(item.renter_gov_id_url))}><Text style={styles.documentLink}>{item.renter_gov_id_url ? 'Open protected government ID' : 'Not provided'}</Text></Pressable>
+
+          <Text style={styles.documentLabel}>Payment Proof:</Text>
+          <Pressable disabled={!item.payment_proof_url} onPress={async () => Linking.openURL(await getPrivateDocumentUrl(item.payment_proof_url))}><Text style={styles.documentLink}>{item.payment_proof_url ? 'Open protected payment proof' : 'Not provided'}</Text></Pressable>
+
+          {item.message ? (
+            <>
+              <Text style={styles.documentLabel}>Details:</Text>
+              <Text style={styles.documentText}>{item.message}</Text>
+            </>
+          ) : null}
+        </View>
       </View>
-      <View style={styles.buttonRow}>
+      {item.status === 'pending' ? <View style={styles.buttonRow}>
         <Pressable
           style={[styles.actionBtn, styles.approveBtn, actionLoading === item.request_id && styles.disabledBtn]}
           onPress={() => handleDecision(item.request_id, true, item.user_id, item.dorms?.name, item.dorm_id)}
@@ -404,7 +512,12 @@ export default function OwnerPanelScreen() {
         >
           <Text style={styles.actionBtnText}>Decline</Text>
         </Pressable>
-      </View>
+      </View> : (
+        <View style={styles.documentContainer}>
+          <Text style={styles.documentLabel}>Current step:</Text>
+          <Text style={styles.documentText}>{item.status === 'payment_submitted' ? 'Payment proof ready for admin verification' : 'Refund requested by renter'}</Text>
+        </View>
+      )}
     </View>
   );
 
@@ -488,6 +601,78 @@ export default function OwnerPanelScreen() {
           </View>
         }
       />
+
+      <Modal visible={Boolean(acceptingRequest)} transparent={true} animationType="slide">
+        <View style={styles.modalBackground}>
+          <View style={styles.modalContent}>
+            <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 480 }}>
+              <Text style={styles.modalTitle}>Accept & send payment details</Text>
+
+              <Text style={styles.formLabel}>Required amount (₱)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="decimal-pad"
+                value={requiredAmount}
+                onChangeText={setRequiredAmount}
+                placeholder="Amount in PHP"
+              />
+
+              <Text style={styles.formLabel}>Payment QR Code Photo</Text>
+              {ownerQrUrl ? (
+                <View style={styles.imagePickerPreviewBox}>
+                  <Image source={{ uri: ownerQrUrl }} style={styles.imagePickerPreview} />
+                  <Pressable style={styles.changeImageBtn} onPress={pickQrImage}>
+                    <Text style={styles.changeImageText}>Change QR Image</Text>
+                  </Pressable>
+                </View>
+              ) : (
+                <Pressable style={styles.pickGalleryBtn} onPress={pickQrImage}>
+                  <Text style={styles.pickGalleryBtnText}>📷 Select QR Photo from Gallery</Text>
+                </Pressable>
+              )}
+
+              <Text style={styles.formLabel}>Contract Document Photo</Text>
+              {contractUrl ? (
+                <View style={styles.imagePickerPreviewBox}>
+                  <Image source={{ uri: contractUrl }} style={styles.imagePickerPreview} />
+                  <Pressable style={styles.changeImageBtn} onPress={pickContractImage}>
+                    <Text style={styles.changeImageText}>Change Contract Photo</Text>
+                  </Pressable>
+                </View>
+              ) : (
+                <Pressable style={styles.pickGalleryBtn} onPress={pickContractImage}>
+                  <Text style={styles.pickGalleryBtnText}>📄 Select Contract Photo from Gallery</Text>
+                </Pressable>
+              )}
+
+              <Text style={styles.noDormsWarning}>
+                The dorm remains available until payment is verified and the transaction is confirmed.
+              </Text>
+            </ScrollView>
+
+            <View style={styles.modalActions}>
+              <Pressable
+                style={[styles.modalActionBtn, styles.cancelModalBtn]}
+                onPress={() => setAcceptingRequest(null)}
+                disabled={uploadingAcceptance}
+              >
+                <Text style={styles.cancelModalBtnText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.modalActionBtn, styles.approveBtn, uploadingAcceptance && styles.disabledBtn]}
+                onPress={submitAcceptance}
+                disabled={uploadingAcceptance}
+              >
+                {uploadingAcceptance ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text style={styles.actionBtnText}>Send to renter</Text>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* Add Offline Tenant Modal */}
       <Modal visible={isAddModalVisible} transparent={true} animationType="slide">
@@ -706,6 +891,30 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
     marginTop: 4,
   },
+  documentContainer: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+  },
+  documentLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+    marginTop: 4,
+  },
+  documentLink: {
+    fontSize: 13,
+    color: '#3b82f6',
+    textDecorationLine: 'underline',
+    marginBottom: 4,
+  },
+  documentText: {
+    fontSize: 13,
+    color: '#334155',
+    fontStyle: 'italic',
+    marginTop: 2,
+  },
   buttonRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -854,5 +1063,47 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '600',
     fontSize: 14,
+  },
+  pickGalleryBtn: {
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    borderStyle: 'dashed',
+    borderRadius: 8,
+    padding: 14,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  pickGalleryBtnText: {
+    color: '#2563eb',
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  imagePickerPreviewBox: {
+    marginBottom: 12,
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  imagePickerPreview: {
+    width: '100%',
+    height: 140,
+    borderRadius: 6,
+    resizeMode: 'cover',
+  },
+  changeImageBtn: {
+    marginTop: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    backgroundColor: '#e2e8f0',
+    borderRadius: 4,
+  },
+  changeImageText: {
+    color: '#334155',
+    fontSize: 12,
+    fontWeight: '600',
   },
 });

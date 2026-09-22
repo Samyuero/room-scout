@@ -12,6 +12,7 @@ export default function SignUp() {
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
   const [username, setUsername] = useState('');
+  const [role, setRole] = useState<'renter' | 'owner'>('renter');
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
 
@@ -23,12 +24,15 @@ export default function SignUp() {
 
     setLoading(true);
     try {
-      // Check username uniqueness first
-      const { data: existing } = await supabase
-        .from('profiles')
-        .select('username')
-        .eq('username', username.toLowerCase().trim())
-        .maybeSingle();
+      // Check username uniqueness across all tables first
+      const cleanUsername = username.toLowerCase().trim();
+      const [renters, owners, admins] = await Promise.all([
+        supabase.from('renters').select('username').eq('username', cleanUsername).maybeSingle(),
+        supabase.from('owners').select('username').eq('username', cleanUsername).maybeSingle(),
+        supabase.from('admins').select('username').eq('username', cleanUsername).maybeSingle()
+      ]);
+
+      const existing = renters.data || owners.data || admins.data;
 
       if (existing) {
         Alert.alert('Error', 'That username is already taken. Please choose another.');
@@ -44,11 +48,31 @@ export default function SignUp() {
           data: {
             full_name: fullName,
             username: username.toLowerCase().trim(),
+            role: role,
           }
         }
       });
 
       if (error) throw error;
+
+      // Ensure profile row exists in the correct table (owners or renters)
+      if (data?.user) {
+        if (role === 'owner') {
+          await supabase.from('owners').upsert({
+            owner_id: data.user.id,
+            username: username.toLowerCase().trim(),
+            full_name: fullName,
+            updated_at: new Date().toISOString()
+          });
+        } else {
+          await supabase.from('renters').upsert({
+            renter_id: data.user.id,
+            username: username.toLowerCase().trim(),
+            full_name: fullName,
+            updated_at: new Date().toISOString()
+          });
+        }
+      }
 
       // Profile will be created automatically by trigger when user is created in auth
       // Navigate to home directly (email confirmation is disabled)
@@ -77,6 +101,9 @@ export default function SignUp() {
         provider: 'google',
         options: {
           redirectTo,
+          queryParams: {
+            role: role,
+          },
         },
       });
 
@@ -167,6 +194,24 @@ export default function SignUp() {
           placeholder="Create a password"
           secureTextEntry
         />
+      </View>
+
+      <View style={styles.inputGroup}>
+        <Text style={styles.label}>I am a...</Text>
+        <View style={styles.roleContainer}>
+          <Pressable
+            style={[styles.roleButton, role === 'renter' && styles.roleButtonActive]}
+            onPress={() => setRole('renter')}
+          >
+            <Text style={[styles.roleText, role === 'renter' && styles.roleTextActive]}>Student / Renter</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.roleButton, role === 'owner' && styles.roleButtonActive]}
+            onPress={() => setRole('owner')}
+          >
+            <Text style={[styles.roleText, role === 'owner' && styles.roleTextActive]}>Dorm Owner</Text>
+          </Pressable>
+        </View>
       </View>
 
       <Button
@@ -265,5 +310,28 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  roleContainer: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  roleButton: {
+    flex: 1,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  roleButtonActive: {
+    borderColor: '#007AFF',
+    backgroundColor: '#e6f2ff',
+  },
+  roleText: {
+    color: '#555',
+    fontWeight: '600',
+  },
+  roleTextActive: {
+    color: '#007AFF',
   },
 });

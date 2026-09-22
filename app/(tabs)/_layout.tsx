@@ -1,11 +1,13 @@
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import type { ColorValue } from 'react-native';
 import { AppColors } from '@/constants/theme';
+import { DormAssistantFab } from '@/components/dorm-assistant-fab';
 
-type TabIcon = keyof typeof Ionicons.glyphMap;
+type TabIconName = keyof typeof Ionicons.glyphMap;
 
-function TabIcon({ name, color, size }: { name: TabIcon; color: string; size: number }) {
+function TabIcon({ name, color, size }: { name: TabIconName; color: ColorValue; size: number }) {
   return <Ionicons name={name} size={size} color={color} />;
 }
 
@@ -15,6 +17,7 @@ export default function TabsLayout() {
   const tabBarHeight = 58 + bottomInset;
 
   return (
+    <>
     <Tabs
       screenOptions={{
         headerShown: false,
@@ -67,6 +70,13 @@ export default function TabsLayout() {
         }}
       />
       <Tabs.Screen
+        name="compare"
+        options={{
+          title: 'Compare',
+          tabBarIcon: ({ color, size }) => <TabIcon name="git-compare-outline" color={color} size={size} />,
+        }}
+      />
+      <Tabs.Screen
         name="profile"
         options={{
           title: 'Profile',
@@ -76,18 +86,18 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="settings"
         options={{
-          title: 'Settings',
-          tabBarIcon: ({ color, size }) => <TabIcon name="settings-outline" color={color} size={size} />,
+          href: null,
         }}
       />
       <Tabs.Screen
         name="about-us"
         options={{
-          title: 'About',
-          tabBarIcon: ({ color, size }) => <TabIcon name="information-circle-outline" color={color} size={size} />,
+          href: null,
         }}
       />
       <Tabs.Screen name="[dormId]" options={{ href: null }} />
     </Tabs>
+    <DormAssistantFab />
+    </>
   );
 }

@@ -55,7 +55,7 @@ export const getDormById = async (id: string) => {
   const { data, error } = await supabase
     .from('dorms')
     .select('*')
-    .eq('id', id)
+    .eq('dorm_id', id)
     .single();
 
   if (error) throw error;
@@ -83,7 +83,7 @@ export const updateDorm = async (id: string, updates: any) => {
   const { data, error } = await supabase
     .from('dorms')
     .update(updates)
-    .eq('id', id)
+    .eq('dorm_id', id)
     .select()
     .single();
 
@@ -98,7 +98,7 @@ export const deleteDorm = async (id: string) => {
   const { error } = await supabase
     .from('dorms')
     .delete()
-    .eq('id', id);
+    .eq('dorm_id', id);
 
   if (error) throw error;
 };
@@ -109,7 +109,7 @@ export const deleteDorm = async (id: string) => {
 export const getDormReviews = async (dormId: string) => {
   const { data, error } = await supabase
     .from('dorm_reviews')
-    .select('*, profiles!inner(full_name, username, avatar_url)')
+    .select('*')
     .eq('dorm_id', dormId)
     .order('created_at', { ascending: false });
 

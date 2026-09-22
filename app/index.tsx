@@ -17,13 +17,15 @@ export default function Index() {
         return;
       }
       try {
-        const { data, error } = await supabase
-          .from('profiles')
-          .select('username')
-          .eq('profile_id', user.id)
-          .single();
+        const [renter, owner, admin] = await Promise.all([
+          supabase.from('renters').select('username').eq('renter_id', user.id).maybeSingle(),
+          supabase.from('owners').select('username').eq('owner_id', user.id).maybeSingle(),
+          supabase.from('admins').select('username').eq('admin_id', user.id).maybeSingle()
+        ]);
 
-        if (data && data.username) {
+        const username = renter.data?.username || owner.data?.username || admin.data?.username;
+
+        if (username) {
           setHasUsername(true);
         } else {
           setHasUsername(false);
@@ -43,8 +45,8 @@ export default function Index() {
 
   if (authLoading || checkingProfile) {
     return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-        <ActivityIndicator size="large" />
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#000000' }}>
+        <ActivityIndicator size="large" color={AppColors.accent} />
       </View>
     );
   }

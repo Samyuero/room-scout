@@ -1,249 +1,111 @@
-import { useState, useCallback } from 'react';
-import {
-  View,
-  Text,
-  TextInput,
-  FlatList,
-  Image,
-  StyleSheet,
-  ActivityIndicator,
-  Dimensions,
-  Pressable,
-  RefreshControl,
-} from 'react-native';
+import { useState } from 'react';
+import { Image } from 'expo-image';
+import { ActivityIndicator, Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { supabase } from '../../src/lib/supabase';
-import { useAuth } from '../../src/hooks/useAuth';
-import { useRouter, useFocusEffect } from 'expo-router';
+import { DiscoverySearchBar, DiscoverySearchSheet } from '@/components/discovery-search';
+import { DormResultCard } from '@/components/dorm-result-card';
 import { AppColors, BorderRadius } from '@/constants/theme';
-
-const { width } = Dimensions.get('window');
-const ITEM_WIDTH = width - 40;
+import { useDiscovery } from '@/context/discovery-context';
+import type { Dorm } from '@/types/dorm';
 
 export default function Home() {
-  const { user } = useAuth();
-  const insets = useSafeAreaInsets();
-  const [dorms, setDorms] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const [searchVisible, setSearchVisible] = useState(false);
+  const [openFilters, setOpenFilters] = useState(false);
+  const { rankedDorms, nearbyDorms, filters, loading, refreshing, refresh, error, isUsingCachedData, location, locationLoading, locationMessage, requestLocation, compareIds, toggleCompare } = useDiscovery();
+  const results = (location ? nearbyDorms : rankedDorms).slice(0, 30);
 
-  const fetchDorms = useCallback(async () => {
-    setLoading(true);
-    try {
-      const { data, error } = await supabase
-        .from('dorms')
-        .select('*')
-        .order('available', { ascending: false })
-        .order('created_at', { ascending: false })
-        .limit(10);
+  function compare(dorm: Dorm) {
+    if (toggleCompare(dorm.dorm_id) === 'limit') Alert.alert('Comparison full', 'Remove one dorm before adding another.');
+  }
 
-      if (error) throw error;
-      setDorms(data || []);
-    } catch (error) {
-      console.error('Error fetching dorms:', error);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
-
-  useFocusEffect(
-    useCallback(() => {
-      fetchDorms();
-    }, [fetchDorms])
-  );
-
-  const refreshData = () => {
-    setRefreshing(true);
-    fetchDorms();
-  };
-
-  const renderDorm = ({ item }: { item: any }) => (
-    <Pressable
-      style={({ pressed }) => [styles.dormCard, pressed && styles.dormCardPressed]}
-      onPress={() => router.push(`/(tabs)/${item.dorm_id}` as any)}
-    >
-      <Image
-        source={
-          Array.isArray(item.images) &&
-          item.images.length > 0 &&
-          typeof item.images[0] === 'string' &&
-          item.images[0].length > 0
-            ? { uri: item.images[0] }
-            : require('../../assets/placeholder.jpg')
-        }
-        style={styles.dormImage}
-        resizeMode="cover"
-      />
-      <View style={styles.dormInfo}>
-        <Text style={styles.dormName}>{item.name}</Text>
-        <Text style={styles.dormPrice}>₱{item.price}/month</Text>
-        <View style={styles.dormTags}>
-          <Text style={[styles.tag, item.available ? styles.availableTag : styles.unavailableTag]}>
-            {item.available ? 'Available' : 'Rented / Unavailable'}
-          </Text>
-          {item.gender_policy && <Text style={styles.tag}>{item.gender_policy}</Text>}
-          {item.utilities && item.utilities.length > 0 && <Text style={styles.tag}>Utilities</Text>}
-        </View>
-      </View>
-    </Pressable>
-  );
-
-  if (loading) {
-    return (
-      <View style={styles.centered}>
-        <ActivityIndicator size="large" color={AppColors.accent} />
-      </View>
-    );
+  if (loading && results.length === 0) {
+    return <View style={styles.centered}><Image source={require('../../assets/logo.png')} contentFit="contain" style={styles.loadingLogo} /><ActivityIndicator color={AppColors.accent} size="large" /><Text style={styles.loadingTitle}>Preparing nearby dorms</Text><Text style={styles.helper}>Ratings, availability and maps are loading.</Text></View>;
   }
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Room Scout</Text>
-        <Text style={styles.subtitle}>Find your perfect dorm or apartment</Text>
-      </View>
-
-      <View style={styles.searchBar}>
-        <TextInput
-          placeholder="Search dorms..."
-          placeholderTextColor={AppColors.textMuted}
-          style={styles.searchInput}
-        />
-      </View>
-
-      {dorms.length === 0 ? (
-        <View style={styles.emptyState}>
-          <Text style={styles.emptyText}>No dorms available yet</Text>
+      <ScrollView
+        contentInsetAdjustmentBehavior="automatic"
+        stickyHeaderIndices={[1]}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} colors={[AppColors.accent]} tintColor={AppColors.accent} />}
+        contentContainerStyle={styles.content}
+      >
+        <View style={styles.brandHeader}>
+          <Image source={require('../../assets/logo.png')} contentFit="contain" style={styles.logo} />
+          <Text style={styles.brandName}>Room Scout</Text>
+          <Text style={styles.brandTagline}>Find a place that feels right.</Text>
         </View>
-      ) : (
-        <FlatList
-          data={dorms}
-          keyExtractor={(item) => item.dorm_id}
-          renderItem={renderDorm}
-          contentContainerStyle={styles.listContent}
-          showsVerticalScrollIndicator={false}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={refreshData}
-              tintColor={AppColors.accent}
-              colors={[AppColors.accent]}
+
+        <View style={styles.stickySearch}>
+          <DiscoverySearchBar
+            value={filters.query}
+            onPress={() => { setOpenFilters(false); setSearchVisible(true); }}
+            onFilterPress={() => { setOpenFilters(true); setSearchVisible(true); }}
+          />
+        </View>
+
+        <View style={styles.body}>
+          <Pressable disabled={locationLoading} onPress={requestLocation} style={styles.locationCard}>
+            <View style={styles.locationIcon}><Ionicons name={location ? 'navigate' : 'navigate-outline'} size={19} color={AppColors.white} /></View>
+            <View style={{ flex: 1 }}><Text style={styles.locationTitle}>{location ? `Dorms within ${filters.radiusKm} km` : 'Show dorms near me'}</Text><Text style={styles.helper}>{locationMessage || 'Location stays on this device and is used for distance ranking.'}</Text></View>
+            <Ionicons name="chevron-forward" size={18} color={AppColors.textMuted} />
+          </Pressable>
+          {isUsingCachedData && <Text style={styles.cacheText}>Saved listings are visible while live availability refreshes.</Text>}
+          {error && <Text selectable style={styles.errorText}>{error}</Text>}
+
+          {results.map((dorm) => (
+            <DormResultCard
+              key={dorm.dorm_id}
+              dorm={dorm}
+              compared={compareIds.includes(dorm.dorm_id)}
+              onCompare={() => compare(dorm)}
+              onPress={() => router.push(`/(tabs)/${dorm.dorm_id}` as never)}
             />
-          }
-        />
-      )}
+          ))}
+          {results.length === 0 && (
+            <View style={styles.empty}>
+              <Ionicons name="home-outline" size={34} color={AppColors.textMuted} />
+              <Text style={styles.sectionTitle}>No dormitories listed yet</Text>
+
+            </View>
+          )}
+        </View>
+      </ScrollView>
+
+      <DiscoverySearchSheet
+        key={`${searchVisible}-${openFilters}`}
+        visible={searchVisible}
+        openFiltersInitially={openFilters}
+        onClose={() => setSearchVisible(false)}
+        onApplied={() => router.push('/(tabs)/search')}
+      />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: AppColors.background,
-  },
-  header: {
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 8,
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: '700',
-    marginBottom: 4,
-    color: AppColors.text,
-    letterSpacing: -0.5,
-  },
-  subtitle: {
-    fontSize: 15,
-    color: AppColors.textSecondary,
-  },
-  searchBar: {
-    paddingHorizontal: 20,
-    paddingBottom: 12,
-  },
-  searchInput: {
-    borderWidth: 1,
-    borderColor: AppColors.inputBorder,
-    backgroundColor: AppColors.input,
-    borderRadius: BorderRadius.md,
-    padding: 14,
-    fontSize: 16,
-    color: AppColors.text,
-  },
-  listContent: {
-    padding: 20,
-    paddingBottom: 80,
-  },
-  dormCard: {
-    backgroundColor: AppColors.surface,
-    borderRadius: BorderRadius.lg,
-    overflow: 'hidden',
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: AppColors.borderSubtle,
-  },
-  dormCardPressed: {
-    opacity: 0.85,
-  },
-  dormImage: {
-    width: ITEM_WIDTH,
-    height: 180,
-  },
-  dormInfo: {
-    padding: 16,
-  },
-  dormName: {
-    fontSize: 18,
-    fontWeight: '600',
-    marginBottom: 4,
-    color: AppColors.text,
-  },
-  dormPrice: {
-    fontSize: 16,
-    color: AppColors.accent,
-    fontWeight: '600',
-    marginBottom: 8,
-  },
-  dormTags: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  tag: {
-    backgroundColor: AppColors.surfaceElevated,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: BorderRadius.full,
-    fontSize: 12,
-    color: AppColors.textSecondary,
-    overflow: 'hidden',
-  },
-  availableTag: {
-    backgroundColor: AppColors.successBg,
-    color: AppColors.success,
-    fontWeight: '600',
-  },
-  unavailableTag: {
-    backgroundColor: AppColors.errorBg,
-    color: AppColors.error,
-    fontWeight: '600',
-  },
-  centered: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: AppColors.background,
-  },
-  emptyState: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 40,
-  },
-  emptyText: {
-    fontSize: 16,
-    color: AppColors.textMuted,
-  },
+  container: { flex: 1, backgroundColor: AppColors.background },
+  content: { paddingBottom: 120 },
+  centered: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, padding: 28, backgroundColor: AppColors.background },
+  loadingLogo: { width: 112, height: 94 },
+  loadingTitle: { color: AppColors.text, fontSize: 18, fontWeight: '800' },
+  brandHeader: { alignItems: 'center', paddingTop: 10, paddingBottom: 16 },
+  logo: { width: 112, height: 86 },
+  brandName: { color: AppColors.text, fontSize: 25, fontWeight: '900', letterSpacing: -0.7 },
+  brandTagline: { color: AppColors.textMuted, fontSize: 11, paddingTop: 3 },
+  stickySearch: { paddingHorizontal: 16, paddingVertical: 10, backgroundColor: AppColors.background },
+  body: { paddingHorizontal: 16, gap: 12 },
+  locationCard: { flexDirection: 'row', alignItems: 'center', gap: 11, padding: 13, borderRadius: 19, borderCurve: 'continuous', backgroundColor: AppColors.surface, borderWidth: 1, borderColor: AppColors.border },
+  locationIcon: { width: 40, height: 40, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: AppColors.accent },
+  locationTitle: { color: AppColors.text, fontSize: 13, fontWeight: '800' },
+  helper: { color: AppColors.textMuted, fontSize: 10, lineHeight: 15 },
+  cacheText: { color: AppColors.warning, fontSize: 10 },
+  errorText: { color: AppColors.error, fontSize: 11 },
+  sectionHeader: { paddingTop: 7, paddingBottom: 1 },
+  sectionTitle: { color: AppColors.text, fontSize: 18, fontWeight: '800' },
+  empty: { alignItems: 'center', gap: 8, padding: 38, borderRadius: BorderRadius.lg, backgroundColor: AppColors.surface },
 });

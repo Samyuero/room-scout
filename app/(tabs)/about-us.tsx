@@ -1,9 +1,19 @@
-import { View, Text, StyleSheet, ScrollView, Linking, Pressable } from 'react-native';
+import { useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, Linking, Pressable, Modal, TextInput, Alert, ActivityIndicator } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppColors, BorderRadius } from '@/constants/theme';
+import { Image } from 'expo-image';
+import { supabase } from '@/lib/supabase';
+import { useAuth } from '@/hooks/useAuth';
 
 export default function AboutUs() {
   const insets = useSafeAreaInsets();
+  const { user } = useAuth();
+  const [reportVisible, setReportVisible] = useState(false);
+  const [subject, setSubject] = useState('');
+  const [description, setDescription] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  // Edit these four records to update the team section; no other files are required.
   const teamMembers = [
     { id: 1, name: 'Angel Faye A. Parba', role: 'Project Manager', bio: 'Responsible for overall project management and coordination.' },
     { id: 2, name: 'Samuel L. Capuras', role: 'Lead Developer', bio: 'Lead developer responsible for the mobile application development.' },
@@ -19,14 +29,47 @@ export default function AboutUs() {
     }
   };
 
+  const submitReport = async () => {
+    const safeSubject = subject.trim().slice(0, 120);
+    const safeDescription = description.trim().slice(0, 2000);
+    if (!safeSubject || !safeDescription) {
+      Alert.alert('Add details', 'Please provide a short subject and a description of the issue.');
+      return;
+    }
+    if (!user) {
+      Alert.alert('Sign in required', 'Sign in first so the SNAP team can follow up on your report.');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const { error } = await supabase.from('support_tickets').insert({
+        user_id: user.id,
+        subject: safeSubject,
+        description: safeDescription,
+      });
+      if (error) throw error;
+      setReportVisible(false);
+      setSubject('');
+      setDescription('');
+      Alert.alert('Report sent', 'Thank you. The SNAP team can now review your report in the admin panel.');
+    } catch (error) {
+      console.error('Support ticket submission failed:', error);
+      Alert.alert('Could not send report', 'Please check your connection and try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <ScrollView
       style={styles.container}
       contentContainerStyle={{ paddingTop: insets.top, paddingBottom: 40 }}
     >
       <View style={styles.header}>
+        <Image source={require('../../assets/logo.png')} contentFit="contain" style={styles.logoSlot} />
         <Text style={styles.title}>About SNAP</Text>
-        <Text style={styles.subtitle}>Samuel Nina Angel Parba</Text>
+        <Text style={styles.subtitle}>Four students, one safer way home.</Text>
       </View>
 
       <View style={styles.content}>
@@ -57,7 +100,7 @@ export default function AboutUs() {
         ))}
 
         <Text style={styles.sectionTitle}>Contact Us</Text>
-        <Text style={styles.description}>Have questions or feedback? We'd love to hear from you!</Text>
+        <Text style={styles.description}>Have questions or feedback? We&apos;d love to hear from you!</Text>
 
         <View style={styles.buttonContainer}>
           <Pressable style={styles.linkButton} onPress={() => openLink('mailto:snap@uclm.edu')}>
@@ -66,13 +109,48 @@ export default function AboutUs() {
           <Pressable style={styles.linkButton} onPress={() => openLink('https://snap.uclm.edu')}>
             <Text style={styles.linkButtonText}>Visit Website</Text>
           </Pressable>
-          <Pressable style={styles.linkButton} onPress={() => openLink('https://github.com/snap/room-scout/issues')}>
+          <Pressable style={styles.linkButton} onPress={() => setReportVisible(true)}>
             <Text style={styles.linkButtonText}>Report Issue</Text>
           </Pressable>
         </View>
 
         <Text style={styles.footer}>© 2026 SNAP — All Rights Reserved</Text>
       </View>
+
+      <Modal visible={reportVisible} transparent animationType="fade" onRequestClose={() => setReportVisible(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Report an issue</Text>
+            <Text style={styles.modalHelp}>Your report goes directly to the SNAP admin panel, not GitHub.</Text>
+            <TextInput
+              value={subject}
+              onChangeText={setSubject}
+              maxLength={120}
+              placeholder="Short subject"
+              placeholderTextColor={AppColors.textMuted}
+              style={styles.input}
+            />
+            <TextInput
+              value={description}
+              onChangeText={setDescription}
+              maxLength={2000}
+              multiline
+              textAlignVertical="top"
+              placeholder="What happened? Include steps to reproduce it if you can."
+              placeholderTextColor={AppColors.textMuted}
+              style={[styles.input, styles.descriptionInput]}
+            />
+            <View style={styles.modalActions}>
+              <Pressable disabled={submitting} onPress={() => setReportVisible(false)} style={styles.cancelButton}>
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </Pressable>
+              <Pressable disabled={submitting} onPress={submitReport} style={styles.submitButton}>
+                {submitting ? <ActivityIndicator color={AppColors.white} /> : <Text style={styles.submitButtonText}>Send report</Text>}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -85,6 +163,11 @@ const styles = StyleSheet.create({
   header: {
     padding: 24,
     alignItems: 'center',
+  },
+  logoSlot: {
+    width: 132,
+    height: 104,
+    marginBottom: 16,
   },
   title: {
     fontSize: 28,
@@ -179,4 +262,34 @@ const styles = StyleSheet.create({
     color: AppColors.textMuted,
     fontSize: 12,
   },
+  modalBackdrop: {
+    flex: 1,
+    justifyContent: 'center',
+    padding: 20,
+    backgroundColor: 'rgba(0, 0, 0, 0.58)',
+  },
+  modalCard: {
+    borderRadius: BorderRadius.lg,
+    padding: 20,
+    backgroundColor: AppColors.surface,
+    borderWidth: 1,
+    borderColor: AppColors.border,
+  },
+  modalTitle: { color: AppColors.text, fontSize: 20, fontWeight: '700' },
+  modalHelp: { color: AppColors.textSecondary, fontSize: 13, lineHeight: 19, marginTop: 6, marginBottom: 16 },
+  input: {
+    color: AppColors.text,
+    borderWidth: 1,
+    borderColor: AppColors.border,
+    backgroundColor: AppColors.input,
+    borderRadius: BorderRadius.sm,
+    padding: 12,
+    marginBottom: 10,
+  },
+  descriptionInput: { minHeight: 120 },
+  modalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 6 },
+  cancelButton: { paddingHorizontal: 16, paddingVertical: 12, borderRadius: BorderRadius.sm },
+  cancelButtonText: { color: AppColors.textSecondary, fontWeight: '700' },
+  submitButton: { minWidth: 116, alignItems: 'center', borderRadius: BorderRadius.sm, paddingHorizontal: 16, paddingVertical: 12, backgroundColor: AppColors.accent },
+  submitButtonText: { color: AppColors.white, fontWeight: '700' },
 });

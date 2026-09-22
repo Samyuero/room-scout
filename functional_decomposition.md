@@ -30,6 +30,7 @@ flowchart TD
     R_RentReq[Rental Actions]
     R_Support[Customer Support]
     R_Profile[View Profile]
+    R_Analytics[Analytics & Insights]
 
     RenterRole --- R_Auth
     R_Auth --- R_Dash
@@ -38,6 +39,7 @@ flowchart TD
     R_Dash --- R_RentReq
     R_Dash --- R_Support
     R_Dash --- R_Profile
+    R_Dash --- R_Analytics
 
     %% Renter Subfeatures
     R_AI_1[AI Conversations]
@@ -46,24 +48,35 @@ flowchart TD
     R_AI --- R_AI_2
 
     R_DB_1[Text-based Search]
-    R_DB_2[Advanced Filters <br> Price, Gender, Amenities, Curfew]
-    R_DB_3[UCLM Nearby / Radius Search]
+    R_DB_2[Advanced Filters <br> Price, Gender, Amenities, Curfew, Pet-Friendly, Parking]
+    R_DB_3[Tricity Urban Areas Search <br> Cebu, Mandaue, San Carlos]
     R_DB_4[Google / Apple Maps directions]
-    R_DB_5[Recommender fallback <br> nearby / budget if empty]
+    R_DB_5[Smart Filtering & AI Dorm Recommendation <br> Agoda-like filtering, Behavior/Roommate matching]
     R_DormBrowse --- R_DB_1
     R_DormBrowse --- R_DB_2
     R_DormBrowse --- R_DB_3
     R_DormBrowse --- R_DB_4
     R_DormBrowse --- R_DB_5
 
-    R_RR_1[Submit Rental Request]
-    R_RR_2[Cancel Lease Agreement]
-    R_RR_3[Track Request Status]
-    R_RR_4[Reviews & Ratings]
+    R_AN_1[Price & Location Heatmap]
+    R_AN_2[Demand Prediction]
+    R_Analytics --- R_AN_1
+    R_Analytics --- R_AN_2
+
+    R_RR_1[Submit Rental/Reservation Request <br> Upload Gov ID]
+    R_RR_2[Review Owner's Contract & QR]
+    R_RR_3[Upload Payment Proof & Agree to Contract]
+    R_RR_4[Cancel Reservation & Request Refund <br> Submit GCash details]
+    R_RR_5[Confirm Refund Received]
+    R_RR_6[Track Request Status]
+    R_RR_7[Reviews & Ratings]
     R_RentReq --- R_RR_1
     R_RentReq --- R_RR_2
     R_RentReq --- R_RR_3
     R_RentReq --- R_RR_4
+    R_RentReq --- R_RR_5
+    R_RentReq --- R_RR_6
+    R_RentReq --- R_RR_7
 
     R_SP_1[Create Ticket]
     R_SP_2[View Ticket replies]
@@ -105,14 +118,18 @@ flowchart TD
     O_DormMan --- O_DM_3
     O_DormMan --- O_DM_4
 
-    O_RM_1[Accept / Decline rental requests]
-    O_RM_2[Add Offline Renter manually <br> Name & Phone]
-    O_RM_3[Manage current tenants list]
-    O_RM_4[Remove renter <br> Auto-availability reset]
+    O_RM_1[Accept Request <br> Provide QR, Amount & Contract]
+    O_RM_2[Verify Payment Proof & Confirm Booking]
+    O_RM_3[Process Refunds <br> Deduct 10% & Upload Proof]
+    O_RM_4[Add Offline Renter manually <br> Name & Phone]
+    O_RM_5[Manage current tenants list]
+    O_RM_6[Remove renter <br> Auto-availability reset]
     O_RentMan --- O_RM_1
     O_RentMan --- O_RM_2
     O_RentMan --- O_RM_3
     O_RentMan --- O_RM_4
+    O_RentMan --- O_RM_5
+    O_RentMan --- O_RM_6
 
     O_SP_1[Support Tickets]
     O_Support --- O_SP_1
@@ -138,9 +155,9 @@ flowchart TD
 
     %% Admin Subfeatures
     A_UM_1[View Profiles]
-    A_UM_2[Approve / Reject Owner verification]
+    A_UM_2[Approve / Reject Owner & Renter verifications]
     A_UM_3[Strip privileges / Revoke roles]
-    A_UM_4[Disable / Ban Users]
+    A_UM_4[Disable / Ban Users (Set Status to INACTIVE)]
     A_UserMan --- A_UM_1
     A_UserMan --- A_UM_2
     A_UserMan --- A_UM_3
@@ -156,7 +173,9 @@ flowchart TD
     A_TM_1[Claim & Assign tickets]
     A_TM_2[Reply & Add notes]
     A_TM_3[Update status <br> Open, In-progress, Resolved]
+    A_TM_4[Oversee Refund Disputes]
     A_TickMan --- A_TM_1
     A_TickMan --- A_TM_2
     A_TickMan --- A_TM_3
+    A_TickMan --- A_TM_4
 ```

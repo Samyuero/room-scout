@@ -47,22 +47,31 @@ create policy "Admins can update all profiles"
 -- Trigger to automatically create or update profile on user signup/login
 create or replace function public.handle_new_user()
 returns trigger as $$
+declare
+    user_name text;
+    full_name_val text;
 begin
+    user_name := NULLIF(trim(new.raw_user_metadata->>'username'), '');
+    full_name_val := NULLIF(trim(new.raw_user_metadata->>'full_name'), '');
+
     insert into public.profiles (id, email, username, full_name, role, updated_at)
     values (
         new.id,
         new.email,
-        COALESCE(NULLIF(raw_user_metadata->>'username', ''), ''),
-        COALESCE(NULLIF(raw_user_metadata->>'full_name', ''), ''),
-        'user',
+        user_name,
+        full_name_val,
+        COALESCE(NULLIF(new.raw_user_metadata->>'role', ''), 'user'),
         now()
     )
     on conflict (id) do update set
         email = EXCLUDED.email,
-        username = EXCLUDED.username,
-        full_name = EXCLUDED.full_name,
+        username = COALESCE(EXCLUDED.username, public.profiles.username),
+        full_name = COALESCE(EXCLUDED.full_name, public.profiles.full_name),
         updated_at = now();
     return new;
+exception
+    when others then
+        return new;
 end;
 $$ language plpgsql security definer;
 

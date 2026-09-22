@@ -133,7 +133,7 @@ export default function SignIn() {
         style={styles.link}
         onPress={() => router.push('/(auth)/sign-up' as any)}
       >
-        Don't have an account? Sign up
+        Don&apos;t have an account? Sign up
       </Text>
     </View>
   );

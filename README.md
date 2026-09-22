@@ -1,136 +1,91 @@
 # Room Scout
 
-Room Scout is an Expo React Native app for finding and listing dormitories. It uses Expo Router, Supabase, and native Android maps through `react-native-maps`.
+Room Scout is an Android-first Expo SDK 56 dorm finder for the SNAP team. The app uses Supabase for authentication/data/realtime and Leaflet with OpenStreetMap for its main discovery map. It can run with cached demo/UI states while unfinished, but production transactions require the supplied Supabase migrations and private document storage.
 
-## Prerequisites
+## Included now
 
-Install these before running the app:
+- GPS-ranked nearby listings, explicit scoring, radius and detailed filters
+- Home, Search, Leaflet Map/price analytics, Compare, Profile, About SNAP, notifications and local dorm-assistant UI
+- Cache-first dorm loading, preloading, realtime refresh and optimistic comparison
+- Reviews with photos, ratings, and a verified-renter badge while exposing only a limited public reviewer display
+- Owner listing proof and admin approval UI
+- Rental/reservation request, owner acceptance/QR, payment proof and admin verification states
+- Structured JSON logs and database-generated notification/audit paths
 
-- Node.js 22.13.x or newer for Expo SDK 56
-- npm
-- Git
-- Android Studio with Android SDK, platform tools, and an Android emulator
-- Expo/EAS CLI when building APKs: `npm install -g eas-cli`
-- A Supabase project
-- A Google Cloud project with Maps SDK for Android enabled
+## Local setup
 
-## First-Time Setup
+Requirements: Node.js 22.13+, npm, Android Studio/device tooling, a Supabase project, and Java 17 for native Android builds.
 
-1. Clone the repository:
-
-   ```bash
-   git clone <repository-url>
-   cd room-scout
-   ```
-
-2. Install dependencies:
-
-   ```bash
-   npm install
-   ```
-
-3. Create your local environment file:
-
-   ```bash
-   copy .env.example .env
-   ```
-
-4. Fill in `.env`:
-
-   ```env
-   EXPO_PUBLIC_SUPABASE_URL=your_supabase_project_url
-   EXPO_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
-   GOOGLE_MAPS_API_KEY=your_android_google_maps_api_key
-   ```
-
-5. Set up Supabase:
-
-   - Open your Supabase project.
-   - Go to SQL Editor.
-   - Run `supabase/schema.sql`.
-   - If needed, run `supabase/additions.sql`.
-   - Create a public storage bucket named `uploaded_images` for dorm photos.
-
-## Google Maps Setup
-
-Android APKs need a real Google Maps API key. Do not use a fake demo key.
-
-1. In Google Cloud Console, enable **Maps SDK for Android**.
-2. Create an API key.
-3. Restrict the key to Android apps.
-4. Add this package name:
-
-   ```text
-   com.snap.rooms
-   ```
-
-5. Add the SHA-1 certificate fingerprint for the keystore used by the build.
-   - For local/debug builds, use your debug keystore SHA-1.
-   - For EAS builds, get the SHA-1 from the Expo project credentials after a build is created.
-6. Put the key in `.env` as `GOOGLE_MAPS_API_KEY`.
-7. Rebuild the APK after changing the key. The key is native build config, so updating `.env` alone will not fix an already-built APK.
-
-The key is read by `app.config.js` and passed to the Expo `react-native-maps` config plugin as `androidGoogleMapsApiKey`.
-
-For EAS cloud builds, also create the key in the EAS environment used by the build profile:
-
-```bash
-eas env:create --name GOOGLE_MAPS_API_KEY --value your_android_google_maps_api_key --environment preview --visibility sensitive
+```powershell
+npm install
+Copy-Item .env.example .env
+npm start -- --localhost
 ```
 
-Repeat for `development` or `production` if you build those profiles.
+For a physical Android phone, `--lan` is normally easier because `localhost` on the phone means the phone itself:
 
-## Run on Android Emulator
-
-Start an Android emulator from Android Studio first, then run:
-
-```bash
-npm run android
+```powershell
+npm start -- --lan
 ```
 
-If Metro is already running:
+All maps, including the owner location picker, use Leaflet with OpenStreetMap tiles and need internet access for tiles.
 
-```bash
-npm start
+## Environment
+
+Fill `.env` locally. Never commit it.
+
+```env
+EXPO_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=YOUR_PUBLISHABLE_KEY
+# Legacy projects may use EXPO_PUBLIC_SUPABASE_ANON_KEY instead.
 ```
 
-Then press `a` in the Expo terminal.
+`.env`, keystores and APK files are ignored by Git. Public/publishable Supabase keys are safe in an app only when Row Level Security remains enabled; service-role keys must never be placed in Expo code.
 
-## Build an APK
+## Supabase setup order
 
-```bash
+For the current storyboard database, run these in the Supabase SQL editor in this exact order:
+
+1. `supabase/schema_v2.sql`
+2. `supabase/capstone42_updates.sql`
+3. `supabase/security_hardening.sql`
+
+Do not deploy `schema_v2.sql` alone: the last migration removes unsafe self-admin policies, restricts private profiles and system logs, validates state transitions, protects listing approval fields, creates storage limits, and provides atomic payment verification.
+
+In Supabase Authentication, enable email confirmation. For Google sign-in, configure the Google provider and allow `roomscout://auth/callback` in redirect URLs. Put privileged AI/payment operations in a Supabase Edge Function; never ship provider secrets in `EXPO_PUBLIC_*` variables.
+
+## APK
+
+`eas.json` contains Android profiles. A preview APK can be built with:
+
+```powershell
+npm install --global eas-cli
 eas login
-eas build -p android --profile preview
+eas build --platform android --profile preview
 ```
 
-Before building, make sure `.env` contains `GOOGLE_MAPS_API_KEY`. If the Maps tab or Add Dorm map closes the app in an APK, rebuild with a valid Maps SDK for Android key and the correct SHA-1 restriction.
+For a fully local native build, install the Android SDK/JDK and run `npx expo run:android`. Test Google OAuth using a development build or APK, not only Expo Go.
 
-## Useful Scripts
+## AI assistant path
 
-- `npm start` - Start the Expo dev server
-- `npm run android` - Start on Android emulator
-- `npm run web` - Start web build
-- `npm run lint` - Run Expo lint
-- `npm run verify-setup` - Check local setup files
-- `npm run setup-supabase` - Create/update `.env` with Supabase credentials
+`src/lib/dorm-assistant.ts` is a privacy-safe, deterministic local assistant today. It accepts natural-language budget/radius/features and ranks public listings, so the app remains usable with no AI bill. Later, call a server-side Edge Function with `DORM_ASSISTANT_SYSTEM_PROMPT` and `getAssistantListingContext`, rate-limit requests, and validate the returned dorm IDs. Never send government IDs, payment proofs, emails, OTPs, reviewer identities, search history, or other users' preferences to a model.
 
-## GitHub Workflow
+## Main file map
 
-After making changes:
+- `app/(tabs)/home.tsx`, `search.tsx`, `map.tsx`, `compare.tsx` — renter discovery UI
+- `src/context/discovery-context.tsx` — cache, preload, realtime and shared comparison/filter state
+- `src/lib/dorm-discovery.ts` — filters, distance and explainable ranking
+- `src/components/leaflet-map-view.tsx` — hardened Leaflet WebView
+- `app/owner-panel.tsx`, `app/admin.tsx`, `app/(tabs)/[dormId].tsx` — transaction actors
+- `supabase/security_hardening.sql` — production-facing RLS and workflow enforcement
 
-```bash
-git status
-git add .
-git commit -m "Describe the change"
-git push origin main
+## Checks
+
+```powershell
+npx tsc --noEmit
+npm run lint
+npx expo config --type public
+git diff --check
 ```
 
-If this is a new repository:
-
-```bash
-git remote add origin <github-repository-url>
-git branch -M main
-git push -u origin main
-```
-
-Do not commit `.env`, keystores, APK files, or Google Maps API keys.
+Before real users, run the migrations in a staging project, test every RLS and private-storage policy with renter/owner/admin accounts, test the full capacity and refund workflows concurrently, and complete a legal/privacy review of the contract and refund wording.

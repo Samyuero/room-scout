@@ -1,10 +1,16 @@
 import { useState, useEffect } from 'react';
-import { View, Text, Image, StyleSheet, ActivityIndicator, TextInput, Alert, Pressable, ScrollView } from 'react-native';
+import { View, Text, Image, StyleSheet, ActivityIndicator, TextInput, Alert, Pressable, ScrollView, Modal } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as Location from 'expo-location';
 import { supabase } from '../../src/lib/supabase';
 import { useAuth } from '../../src/hooks/useAuth';
 import { useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
 import { AppColors, BorderRadius } from '@/constants/theme';
+import { uploadImage } from '@/utils/imageUpload';
+import { LeafletMapView } from '@/components/leaflet-map-view';
+import { UCLM_COORDINATES } from '@/constants/map';
 
 export default function Profile() {
   const { user } = useAuth();
@@ -16,6 +22,32 @@ export default function Profile() {
   const [editMode, setEditMode] = useState(false);
   const [editedProfile, setEditedProfile] = useState<any>({});
   const [unreadCount, setUnreadCount] = useState(0);
+  const [avatarUri, setAvatarUri] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  // Dedicated preferences modal state
+  const [prefModalVisible, setPrefModalVisible] = useState(false);
+  const [prefForm, setPrefForm] = useState<{
+    budget_min: string;
+    budget_max: string;
+    preferred_location: string;
+    radius_km: string;
+    parking: string;
+    pet_friendly: boolean;
+    latitude: number;
+    longitude: number;
+  }>({
+    budget_min: '',
+    budget_max: '',
+    preferred_location: '',
+    radius_km: '10',
+    parking: '',
+    pet_friendly: false,
+    latitude: Number(UCLM_COORDINATES.latitude),
+    longitude: Number(UCLM_COORDINATES.longitude),
+  });
+  const [showMapPicker, setShowMapPicker] = useState(false);
+  const [savingPref, setSavingPref] = useState(false);
 
   useEffect(() => {
     const loadProfile = async () => {
@@ -23,16 +55,35 @@ export default function Profile() {
 
       setLoading(true);
       try {
-        // Get profile
-        const { data: profileData, error: profileError } = await supabase
-          .from('profiles')
-          .select('*')
-          .eq('profile_id', user.id)
-          .single();
+        // Determine which role table the user belongs to
+        const [renterRes, ownerRes, adminRes] = await Promise.all([
+          supabase.from('renters').select('*').eq('renter_id', user.id).maybeSingle(),
+          supabase.from('owners').select('*').eq('owner_id', user.id).maybeSingle(),
+          supabase.from('admins').select('*').eq('admin_id', user.id).maybeSingle()
+        ]);
 
-        if (profileError && profileError.code !== 'PGRST116') throw profileError; // Ignore if not found (will create)
+        let userRole = 'renter';
+        let profileData = renterRes.data;
+        if (adminRes.data) {
+          userRole = 'admin';
+          profileData = adminRes.data;
+        } else if (ownerRes.data) {
+          userRole = 'owner';
+          profileData = ownerRes.data;
+        }
 
-        // Get user's dorms
+        // If owner, check verification status
+        let verificationStatus = null;
+        if (userRole === 'owner') {
+          const { data: verData } = await supabase
+            .from('owner_verifications')
+            .select('status')
+            .eq('user_id', user.id)
+            .maybeSingle();
+          verificationStatus = verData?.status || null;
+        }
+
+        // Get user's dorms (only for owners)
         const { data: dormsData, error: dormsError } = await supabase
           .from('dorms')
           .select('*')
@@ -40,17 +91,24 @@ export default function Profile() {
 
         if (dormsError) throw dormsError;
 
-        setProfile(profileData || {
-          profile_id: user.id,
+        const mergedProfile = profileData ? {
+          ...profileData,
+          email: user.email,
+          role: userRole,
+          verification_status: verificationStatus,
+        } : {
+          renter_id: user.id, // Fallback ID property
           email: user.email,
           full_name: user.user_metadata?.full_name || '',
           username: user.user_metadata?.username || '',
           avatar_url: user.user_metadata?.avatar_url || '',
-          role: 'user',
-        });
+          role: userRole,
+          verification_status: verificationStatus,
+        };
 
+        setProfile(mergedProfile);
         setDorms(dormsData || []);
-        setEditedProfile(profileData || {});
+        setEditedProfile(mergedProfile);
 
         const { count, error: notifError } = await supabase
           .from('notifications')
@@ -76,76 +134,174 @@ export default function Profile() {
   const handleSaveProfile = async () => {
     if (!user) return;
 
+    const username = String(editedProfile.username || '').trim();
+    const fullName = String(editedProfile.full_name || '').trim();
+
+    if (username.length < 3 || username.length > 30 || !/^[a-zA-Z0-9_]+$/.test(username)) {
+      Alert.alert('Invalid username', 'Use 3–30 letters, numbers, or underscores.');
+      return;
+    }
+    if (!fullName || fullName.length > 80) {
+      Alert.alert('Invalid name', 'Enter a name between 1 and 80 characters.');
+      return;
+    }
+
+    setSaving(true);
     try {
+      const avatarUrl = avatarUri
+        ? await uploadImage(`${user.id}/avatar/${Date.now()}.${avatarUri.split('.').pop() || 'jpg'}`, avatarUri)
+        : editedProfile.avatar_url;
       // Update Supabase auth user metadata
       await supabase.auth.updateUser({
         data: {
-          full_name: editedProfile.full_name,
-          username: editedProfile.username,
-          avatar_url: editedProfile.avatar_url,
+          full_name: fullName,
+          username,
+          avatar_url: avatarUrl,
         }
       });
 
-      // Update or insert profile
+      // Determine the right table to update based on role
+      const table = profile?.role === 'admin' ? 'admins' : profile?.role === 'owner' ? 'owners' : 'renters';
+      const idColumn = profile?.role === 'admin' ? 'admin_id' : profile?.role === 'owner' ? 'owner_id' : 'renter_id';
+      const updates: Record<string, unknown> = {
+        full_name: fullName,
+        username,
+        avatar_url: avatarUrl,
+        updated_at: new Date().toISOString(),
+      };
+
       const { error } = await supabase
-        .from('profiles')
-        .upsert({
-          profile_id: user.id,
-          updated_at: new Date().toISOString(),
-          ...editedProfile,
-        });
+        .from(table)
+        .update(updates)
+        .eq(idColumn, user.id);
 
       if (error) throw error;
 
       setEditMode(false);
-      setProfile(editedProfile);
+      const saved = { ...editedProfile, ...updates };
+      setProfile(saved);
+      setEditedProfile(saved);
+      setAvatarUri('');
+      Alert.alert('Profile saved', 'Your profile details were updated.');
     } catch (error) {
       console.error('Error saving profile:', error);
+      Alert.alert('Could not save profile', error instanceof Error ? error.message : 'Please try again.');
+    } finally {
+      setSaving(false);
     }
+  };
+
+  // Preference Modal Handlers
+  const handleOpenPrefModal = () => {
+    const prefs = profile?.behavior_preferences || {};
+    setPrefForm({
+      budget_min: prefs.budget_min ? String(prefs.budget_min) : '',
+      budget_max: prefs.budget_max ? String(prefs.budget_max) : '',
+      preferred_location: prefs.preferred_location || '',
+      radius_km: String(prefs.radius_km || 10),
+      parking: prefs.parking || '',
+      pet_friendly: Boolean(prefs.pet_friendly),
+      latitude: Number(prefs.latitude) || UCLM_COORDINATES.latitude,
+      longitude: Number(prefs.longitude) || UCLM_COORDINATES.longitude,
+    });
+    setShowMapPicker(false);
+    setPrefModalVisible(true);
+  };
+
+  const handlePickMapLocation = async (coords: { latitude: number; longitude: number }) => {
+    setPrefForm((prev) => ({
+      ...prev,
+      latitude: coords.latitude,
+      longitude: coords.longitude,
+    }));
+
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status === 'granted') {
+        const [geo] = await Location.reverseGeocodeAsync(coords);
+        if (geo) {
+          const areaParts = [geo.name, geo.district || geo.subregion, geo.city].filter(Boolean);
+          const areaName = areaParts.slice(0, 2).join(', ');
+          if (areaName) {
+            setPrefForm((prev) => ({
+              ...prev,
+              preferred_location: areaName,
+            }));
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Error reverse geocoding location:', err);
+    }
+  };
+
+  const handleSavePreferencesOnly = async () => {
+    if (!user) return;
+    const bMin = Number(prefForm.budget_min) || null;
+    const bMax = Number(prefForm.budget_max) || null;
+
+    if (bMin !== null && bMin < 0) {
+      Alert.alert('Invalid budget', 'Minimum budget cannot be negative.');
+      return;
+    }
+    if (bMax !== null && bMax < 0) {
+      Alert.alert('Invalid budget', 'Maximum budget cannot be negative.');
+      return;
+    }
+    if (bMin !== null && bMax !== null && bMin > bMax) {
+      Alert.alert('Invalid budget', 'Maximum budget must be greater than or equal to minimum budget.');
+      return;
+    }
+
+    setSavingPref(true);
+    try {
+      const newPreferences = {
+        budget_min: bMin,
+        budget_max: bMax,
+        preferred_location: prefForm.preferred_location.trim().slice(0, 120),
+        latitude: prefForm.latitude,
+        longitude: prefForm.longitude,
+        radius_km: Math.max(1, Math.min(50, Number(prefForm.radius_km) || 10)),
+        pet_friendly: Boolean(prefForm.pet_friendly),
+        parking: prefForm.parking,
+      };
+
+      const { error } = await supabase
+        .from('renters')
+        .update({
+          behavior_preferences: newPreferences,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('renter_id', user.id);
+
+      if (error) throw error;
+
+      const updatedProfile = {
+        ...profile,
+        behavior_preferences: newPreferences,
+      };
+      setProfile(updatedProfile);
+      setEditedProfile(updatedProfile);
+      setPrefModalVisible(false);
+      Alert.alert('Preferences Saved', 'Your dorm preferences have been successfully updated.');
+    } catch (err: any) {
+      console.error('Error saving preferences:', err);
+      Alert.alert('Could not save preferences', err.message || 'Please try again.');
+    } finally {
+      setSavingPref(false);
+    }
+  };
+
+  const pickAvatar = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, aspect: [1, 1], quality: 0.75 });
+    if (!result.canceled) setAvatarUri(result.assets[0].uri);
   };
 
   const handleApplyForOwner = async () => {
     if (!user) return;
 
-    // Check if email is verified
-    const isEmailVerified = !!user.email_confirmed_at;
-    if (!isEmailVerified) {
-      // Send verification email via Supabase OTP
-      try {
-        const { error: otpError } = await supabase.auth.resend({
-          type: 'signup',
-          email: user.email!,
-        });
-        if (otpError) console.error('Error sending verification email:', otpError);
-      } catch (e) {
-        console.error('Failed to send verification:', e);
-      }
-
-      Alert.alert(
-        'Email Verification Required',
-        'To apply as a Dorm Owner, your email must be verified. We have sent a verification link to your email address. Please verify and try again.',
-        [{ text: 'OK' }]
-      );
-      return;
-    }
-
-    try {
-      const { error } = await supabase
-        .from('profiles')
-        .update({ role: 'pending_owner' })
-        .eq('profile_id', user.id);
-
-      if (error) throw error;
-
-      setProfile((prev: any) => ({ ...prev, role: 'pending_owner' }));
-      Alert.alert(
-        'Application Submitted',
-        'Your application for Dorm Owner status has been submitted and is pending admin verification.'
-      );
-    } catch (error: any) {
-      console.error('Error applying for owner:', error);
-      Alert.alert('Error', error.message);
-    }
+    // Route to the owner verification screen
+    router.push('/(auth)/owner-verification' as any);
   };
 
   const handleSignOut = async () => {
@@ -202,16 +358,14 @@ export default function Profile() {
             placeholder="Choose a username"
           />
 
-          <Text style={styles.formLabel}>Avatar URL</Text>
-          <TextInput
-            style={styles.input}
-            value={editedProfile.avatar_url || ''}
-            onChangeText={(text) => setEditedProfile((prev: any) => ({ ...prev, avatar_url: text }))}
-            placeholder="URL to your avatar image"
-          />
+          <Text style={styles.formLabel}>Profile photo</Text>
+          <Pressable onPress={pickAvatar} style={styles.photoPicker}>
+            <Image source={avatarUri ? { uri: avatarUri } : editedProfile.avatar_url ? { uri: editedProfile.avatar_url } : require('../../assets/placeholder.jpg')} style={styles.photoPickerImage} />
+            <Text style={styles.photoPickerText}>{avatarUri || editedProfile.avatar_url ? 'Change photo' : 'Choose from gallery'}</Text>
+          </Pressable>
 
-          <Pressable style={styles.saveButton} onPress={handleSaveProfile}>
-            <Text style={styles.saveButtonText}>Save Profile</Text>
+          <Pressable disabled={saving} style={styles.saveButton} onPress={handleSaveProfile}>
+            <Text style={styles.saveButtonText}>{saving ? 'Uploading…' : 'Save Profile'}</Text>
           </Pressable>
           <Pressable style={styles.cancelButton} onPress={() => setEditMode(false)}>
             <Text style={styles.cancelButtonText}>Cancel</Text>
@@ -242,20 +396,38 @@ export default function Profile() {
             styles.badge,
             profile?.role === 'admin' && styles.adminBadge,
             profile?.role === 'owner' && styles.ownerBadge,
-            profile?.role === 'pending_owner' && styles.pendingBadge,
           ]}>
             <Text style={[
               styles.badgeText,
               profile?.role === 'admin' && styles.adminBadgeText,
               profile?.role === 'owner' && styles.ownerBadgeText,
-              profile?.role === 'pending_owner' && styles.pendingBadgeText,
             ]}>
               {profile?.role === 'admin' && 'Administrator'}
-              {profile?.role === 'owner' && 'Verified Dorm Owner'}
-              {profile?.role === 'pending_owner' && 'Pending Verification'}
-              {(profile?.role === 'user' || !profile?.role) && 'Standard User'}
+              {profile?.role === 'owner' && (profile?.verification_status === 'approved' ? 'Verified Dorm Owner' : profile?.verification_status === 'pending' ? 'Pending Verification' : 'Dorm Owner')}
+              {profile?.role === 'renter' && 'Renter'}
             </Text>
           </View>
+
+          {profile?.role === 'renter' && (
+            <View style={styles.preferenceSummary}>
+              <View style={styles.preferenceSummaryHeader}>
+                <Text style={styles.preferenceSummaryTitle}>My dorm preferences</Text>
+                <Pressable style={styles.editPrefButton} onPress={handleOpenPrefModal}>
+                  <Ionicons name="pencil" size={13} color={AppColors.accent} />
+                  <Text style={styles.editPrefButtonText}>Edit</Text>
+                </Pressable>
+              </View>
+              <Text style={styles.preferenceSummaryText}>
+                {profile?.behavior_preferences?.budget_min || profile?.behavior_preferences?.budget_max
+                  ? `₱${Number(profile?.behavior_preferences?.budget_min || 0).toLocaleString('en-PH')} – ₱${Number(profile?.behavior_preferences?.budget_max || 0).toLocaleString('en-PH')}`
+                  : 'Any budget'}
+                {' · '}{profile?.behavior_preferences?.preferred_location || 'Any location'}
+                {' · '}{profile?.behavior_preferences?.radius_km || 10} km
+                {profile?.behavior_preferences?.parking ? ` · ${profile.behavior_preferences.parking} parking` : ''}
+                {profile?.behavior_preferences?.pet_friendly ? ' · Pet-friendly' : ''}
+              </Text>
+            </View>
+          )}
 
           {/* Stats Container (only for owners/admins) */}
           {(profile?.role === 'owner' || profile?.role === 'admin') && (
@@ -267,30 +439,32 @@ export default function Profile() {
             </View>
           )}
 
-          {/* Owner Application Banner */}
-          {profile?.role === 'user' && (
-            <View style={styles.bannerContainer}>
-              <Text style={styles.bannerTitle}>Become a Dorm Owner</Text>
-              <Text style={styles.bannerText}>Apply for owner verification to list and manage your own dormitories on Room Scout.</Text>
-              <Pressable style={styles.bannerButton} onPress={handleApplyForOwner}>
-                <Text style={styles.bannerButtonText}>Apply for Dorm Owner</Text>
-              </Pressable>
-            </View>
-          )}
-
-          {profile?.role === 'pending_owner' && (
-            <View style={[styles.bannerContainer, styles.pendingBanner]}>
-              <Text style={[styles.bannerTitle, styles.pendingBannerTitle]}>Verification Pending</Text>
-              <Text style={[styles.bannerText, styles.pendingBannerText]}>
-                Your application for Dorm Owner verification is currently being reviewed by an administrator.
-              </Text>
-            </View>
+          {/* Owner Verification Banner (only for owners) */}
+          {profile?.role === 'owner' && (
+            <>
+              {profile?.verification_status === 'pending' ? (
+                <View style={[styles.bannerContainer, styles.pendingBanner]}>
+                  <Text style={[styles.bannerTitle, styles.pendingBannerTitle]}>Verification Pending</Text>
+                  <Text style={[styles.bannerText, styles.pendingBannerText]}>
+                    Your application for Dorm Owner verification is currently being reviewed by an administrator.
+                  </Text>
+                </View>
+              ) : profile?.verification_status !== 'approved' ? (
+                <View style={styles.bannerContainer}>
+                  <Text style={styles.bannerTitle}>Dorm Owner Verification Required</Text>
+                  <Text style={styles.bannerText}>Submit your government ID or business permit to get verified and start adding listings.</Text>
+                  <Pressable style={styles.bannerButton} onPress={handleApplyForOwner}>
+                    <Text style={styles.bannerButtonText}>Request Dorm Owner</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+            </>
           )}
         </View>
       )}
 
       {/* Dorm Listings Section (Only visible for owners/admins) */}
-      {(profile?.role === 'owner' || profile?.role === 'admin') ? (
+      {(profile?.role === 'owner' || profile?.role === 'admin') && (
         <View style={styles.sectionsContainer}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>My Dorm Listings</Text>
@@ -312,18 +486,17 @@ export default function Profile() {
               ))}
             </View>
           ) : (
-            <Text style={styles.noDormsText}>You haven't listed any dorms yet. Add your first dorm!</Text>
+            <Text style={styles.noDormsText}>You haven&apos;t listed any dorms yet. Add your first dorm!</Text>
           )}
-        </View>
-      ) : (
-        <View style={styles.noAccessContainer}>
-          <Text style={styles.noAccessText}>
-            Apply for Dorm Owner status above to start listing and managing dormitories on Room Scout.
-          </Text>
         </View>
       )}
 
       <View style={styles.signOutContainer}>
+        <View style={styles.profileLinks}>
+          <Pressable style={styles.profileLink} onPress={() => router.push('/chat')}><Ionicons name="sparkles-outline" size={21} color={AppColors.accent} /><Text style={styles.profileLinkText}>Dorm Assistant</Text></Pressable>
+          <Pressable style={styles.profileLink} onPress={() => router.push('/(tabs)/settings')}><Ionicons name="settings-outline" size={21} color={AppColors.accent} /><Text style={styles.profileLinkText}>Settings</Text></Pressable>
+          <Pressable style={styles.profileLink} onPress={() => router.push('/(tabs)/about-us')}><Ionicons name="information-circle-outline" size={21} color={AppColors.accent} /><Text style={styles.profileLinkText}>About SNAP</Text></Pressable>
+        </View>
         {/* Notifications Button */}
         <View style={{ marginBottom: 12 }}>
           <Pressable
@@ -365,6 +538,152 @@ export default function Profile() {
           <Text style={styles.signOutButtonText}>Sign Out</Text>
         </Pressable>
       </View>
+
+      {/* Dedicated Dorm Preferences Modal */}
+      <Modal
+        visible={prefModalVisible}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setPrefModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContainer}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Dorm Preferences</Text>
+              <Pressable style={styles.modalCloseButton} onPress={() => setPrefModalVisible(false)}>
+                <Ionicons name="close" size={22} color={AppColors.textSecondary} />
+              </Pressable>
+            </View>
+
+            <ScrollView showsVerticalScrollIndicator={false} style={styles.modalBody}>
+              <Text style={styles.preferencesHint}>
+                Preferences are used to customize and rank public dorm listings for you.
+              </Text>
+
+              {/* Budget Inputs */}
+              <View style={styles.preferenceRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.formLabel}>Minimum Budget (₱)</Text>
+                  <TextInput
+                    style={styles.input}
+                    keyboardType="number-pad"
+                    value={prefForm.budget_min}
+                    onChangeText={(val) => setPrefForm((prev) => ({ ...prev, budget_min: val.replace(/\D/g, '') }))}
+                    placeholder="₱0"
+                    placeholderTextColor={AppColors.textMuted}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.formLabel}>Maximum Budget (₱)</Text>
+                  <TextInput
+                    style={styles.input}
+                    keyboardType="number-pad"
+                    value={prefForm.budget_max}
+                    onChangeText={(val) => setPrefForm((prev) => ({ ...prev, budget_max: val.replace(/\D/g, '') }))}
+                    placeholder="₱10,000"
+                    placeholderTextColor={AppColors.textMuted}
+                  />
+                </View>
+              </View>
+
+              {/* Location Input & Map Picker Toggle */}
+              <Text style={styles.formLabel}>Preferred Location</Text>
+              <TextInput
+                style={styles.input}
+                maxLength={120}
+                value={prefForm.preferred_location}
+                onChangeText={(val) => setPrefForm((prev) => ({ ...prev, preferred_location: val }))}
+                placeholder="e.g. Barangay, school, or workplace"
+                placeholderTextColor={AppColors.textMuted}
+              />
+
+              <Pressable
+                style={styles.mapPickerToggleButton}
+                onPress={() => setShowMapPicker((prev) => !prev)}
+              >
+                <Ionicons name="map-outline" size={18} color={AppColors.accent} />
+                <Text style={styles.mapPickerToggleText}>
+                  {showMapPicker ? 'Hide Map View' : '📍 Choose Area on Map (Optional)'}
+                </Text>
+              </Pressable>
+
+              {showMapPicker && (
+                <View style={styles.mapContainer}>
+                  <Text style={styles.mapHintText}>
+                    Tap anywhere on the map or drag the pin to select your preferred area:
+                  </Text>
+                  <View style={styles.mapWrapper}>
+                    <LeafletMapView
+                      dorms={[]}
+                      center={{ latitude: prefForm.latitude, longitude: prefForm.longitude }}
+                      radiusKm={Number(prefForm.radius_km) || 10}
+                      userLocation={null}
+                      showAnalytics={false}
+                      pickerLocation={{ latitude: prefForm.latitude, longitude: prefForm.longitude }}
+                      onPickLocation={handlePickMapLocation}
+                    />
+                  </View>
+                  <Text style={styles.mapCoordsText}>
+                    Selected Coordinates: {prefForm.latitude.toFixed(4)}, {prefForm.longitude.toFixed(4)}
+                  </Text>
+                </View>
+              )}
+
+              {/* Radius Input */}
+              <Text style={styles.formLabel}>Search Radius (1–50 km)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="number-pad"
+                value={prefForm.radius_km}
+                onChangeText={(val) => setPrefForm((prev) => ({ ...prev, radius_km: val.replace(/\D/g, '').slice(0, 2) }))}
+                placeholder="10"
+                placeholderTextColor={AppColors.textMuted}
+              />
+
+              {/* Parking Preference */}
+              <Text style={styles.formLabel}>Parking Requirement</Text>
+              <View style={styles.preferenceChips}>
+                {['None', 'Motorcycle', 'Car', 'Bicycle'].map((parking) => (
+                  <Pressable
+                    key={parking}
+                    onPress={() =>
+                      setPrefForm((prev) => ({ ...prev, parking: parking === 'None' ? '' : parking }))
+                    }
+                    style={[
+                      styles.preferenceChip,
+                      prefForm.parking === (parking === 'None' ? '' : parking) && styles.preferenceChipActive,
+                    ]}
+                  >
+                    <Text style={styles.preferenceChipText}>{parking}</Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              {/* Pet-Friendly Chip */}
+              <Pressable
+                onPress={() => setPrefForm((prev) => ({ ...prev, pet_friendly: !prev.pet_friendly }))}
+                style={[styles.preferenceChip, prefForm.pet_friendly && styles.preferenceChipActive, { marginTop: 8 }]}
+              >
+                <Text style={styles.preferenceChipText}>
+                  {prefForm.pet_friendly ? '✓ Pet-friendly required' : '+ Pet-friendly required'}
+                </Text>
+              </Pressable>
+
+              {/* Save & Cancel Buttons */}
+              <Pressable disabled={savingPref} style={styles.saveButton} onPress={handleSavePreferencesOnly}>
+                {savingPref ? (
+                  <ActivityIndicator color={AppColors.white} />
+                ) : (
+                  <Text style={styles.saveButtonText}>Save Preferences</Text>
+                )}
+              </Pressable>
+              <Pressable style={styles.cancelButton} onPress={() => setPrefModalVisible(false)}>
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </Pressable>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -436,6 +755,20 @@ const styles = StyleSheet.create({
     color: AppColors.text,
     marginBottom: 8,
   },
+  preferencesForm: { marginTop: 14, paddingTop: 14, borderTopWidth: 1, borderTopColor: AppColors.borderSubtle },
+  preferencesTitle: { color: AppColors.text, fontSize: 17, fontWeight: '800' },
+  preferencesHint: { color: AppColors.textMuted, fontSize: 11, marginTop: 3 },
+  preferenceRow: { flexDirection: 'row', gap: 10 },
+  preferenceChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginBottom: 8 },
+  preferenceChip: { alignSelf: 'flex-start', paddingHorizontal: 11, paddingVertical: 8, borderRadius: BorderRadius.full, borderWidth: 1, borderColor: AppColors.border, backgroundColor: AppColors.surfaceElevated },
+  preferenceChipActive: { borderColor: AppColors.accent, backgroundColor: AppColors.accentMuted },
+  preferenceChipText: { color: AppColors.text, fontSize: 11, fontWeight: '700' },
+  preferenceSummary: { width: '100%', padding: 12, marginTop: 4, borderRadius: BorderRadius.md, backgroundColor: AppColors.surfaceElevated },
+  preferenceSummaryHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  editPrefButton: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 4, borderRadius: BorderRadius.full, backgroundColor: AppColors.surface, borderWidth: 1, borderColor: AppColors.border },
+  editPrefButtonText: { color: AppColors.accent, fontSize: 12, fontWeight: '600' },
+  preferenceSummaryTitle: { color: AppColors.text, fontSize: 13, fontWeight: '800' },
+  preferenceSummaryText: { color: AppColors.textSecondary, fontSize: 11, marginTop: 4 },
   saveButton: {
     backgroundColor: AppColors.accent,
     borderRadius: BorderRadius.md,
@@ -596,6 +929,12 @@ const styles = StyleSheet.create({
     padding: 20,
     paddingBottom: 40,
   },
+  profileLinks: { flexDirection: 'row', justifyContent: 'center', gap: 10, marginBottom: 14 },
+  profileLink: { width: 92, minHeight: 76, alignItems: 'center', justifyContent: 'center', gap: 7, padding: 9, borderRadius: BorderRadius.lg, borderWidth: 1, borderColor: AppColors.border, backgroundColor: AppColors.surface },
+  profileLinkText: { color: AppColors.text, fontSize: 10, fontWeight: '700', textAlign: 'center' },
+  photoPicker: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 10, marginTop: 6, marginBottom: 12, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: AppColors.border, backgroundColor: AppColors.surfaceElevated },
+  photoPickerImage: { width: 58, height: 58, borderRadius: 29 },
+  photoPickerText: { color: AppColors.accent, fontSize: 13, fontWeight: '700' },
   scrollContent: {
     flexGrow: 1,
   },
@@ -760,5 +1099,80 @@ const styles = StyleSheet.create({
     color: AppColors.error,
     fontSize: 16,
     fontWeight: '700',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    justifyContent: 'flex-end',
+  },
+  modalContainer: {
+    backgroundColor: AppColors.surface,
+    borderTopLeftRadius: BorderRadius.xl,
+    borderTopRightRadius: BorderRadius.xl,
+    maxHeight: '90%',
+    padding: 20,
+    borderWidth: 1,
+    borderColor: AppColors.borderSubtle,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: AppColors.borderSubtle,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: AppColors.text,
+  },
+  modalCloseButton: {
+    padding: 4,
+  },
+  modalBody: {
+    marginTop: 12,
+  },
+  mapPickerToggleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    padding: 12,
+    borderRadius: BorderRadius.md,
+    backgroundColor: AppColors.surfaceElevated,
+    borderWidth: 1,
+    borderColor: AppColors.border,
+    marginBottom: 12,
+    marginTop: 4,
+  },
+  mapPickerToggleText: {
+    color: AppColors.accent,
+    fontWeight: '600',
+    fontSize: 14,
+  },
+  mapContainer: {
+    marginBottom: 16,
+    borderRadius: BorderRadius.md,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: AppColors.border,
+    padding: 10,
+    backgroundColor: AppColors.surfaceElevated,
+  },
+  mapHintText: {
+    color: AppColors.textSecondary,
+    fontSize: 12,
+    marginBottom: 8,
+  },
+  mapWrapper: {
+    height: 200,
+    borderRadius: BorderRadius.md,
+    overflow: 'hidden',
+  },
+  mapCoordsText: {
+    color: AppColors.textMuted,
+    fontSize: 11,
+    marginTop: 6,
+    textAlign: 'center',
   },
 });

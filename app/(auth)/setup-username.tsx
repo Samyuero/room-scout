@@ -21,14 +21,15 @@ export default function SetupUsername() {
 
     setChecking(true);
     try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('username')
-        .eq('username', text.toLowerCase().trim())
-        .maybeSingle();
+      const cleanText = text.toLowerCase().trim();
+      const [renters, owners, admins] = await Promise.all([
+        supabase.from('renters').select('username').eq('username', cleanText).maybeSingle(),
+        supabase.from('owners').select('username').eq('username', cleanText).maybeSingle(),
+        supabase.from('admins').select('username').eq('username', cleanText).maybeSingle()
+      ]);
 
-      if (error) throw error;
-      setUsernameAvailable(!data); // available if no existing row
+      const existing = renters.data || owners.data || admins.data;
+      setUsernameAvailable(!existing); // available if no existing row
     } catch (err) {
       console.error('Error checking username:', err);
       setUsernameAvailable(null);
@@ -60,40 +61,53 @@ export default function SetupUsername() {
       const avatarUrl = user.user_metadata?.avatar_url || user.user_metadata?.picture || '';
 
       // Check if a profile row already exists (Google sign-in may not have one)
-      const { data: existingProfile } = await supabase
-        .from('profiles')
-        .select('profile_id')
-        .eq('profile_id', user.id)
-        .maybeSingle();
+      const [renterRes, ownerRes, adminRes] = await Promise.all([
+        supabase.from('renters').select('renter_id').eq('renter_id', user.id).maybeSingle(),
+        supabase.from('owners').select('owner_id').eq('owner_id', user.id).maybeSingle(),
+        supabase.from('admins').select('admin_id').eq('admin_id', user.id).maybeSingle()
+      ]);
 
-      if (existingProfile) {
-        // Update existing profile with username
-        const { error } = await supabase
-          .from('profiles')
-          .update({
-            username: cleanUsername,
-            full_name: fullName || undefined,
-            avatar_url: avatarUrl || undefined,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('profile_id', user.id);
-
+      if (adminRes.data) {
+        const { error } = await supabase.from('admins').update({
+          username: cleanUsername, full_name: fullName || undefined, avatar_url: avatarUrl || undefined, updated_at: new Date().toISOString()
+        }).eq('admin_id', user.id);
         if (error) throw error;
+        router.replace('/(tabs)/home' as any);
+      } else if (ownerRes.data) {
+        const { error } = await supabase.from('owners').update({
+          username: cleanUsername, full_name: fullName || undefined, avatar_url: avatarUrl || undefined, updated_at: new Date().toISOString()
+        }).eq('owner_id', user.id);
+        if (error) throw error;
+        // Route to verification for owners
+        router.replace('/(auth)/owner-verification' as any);
+      } else if (renterRes.data) {
+        const { error } = await supabase.from('renters').update({
+          username: cleanUsername, full_name: fullName || undefined, avatar_url: avatarUrl || undefined, updated_at: new Date().toISOString()
+        }).eq('renter_id', user.id);
+        if (error) throw error;
+        router.replace('/(tabs)/home' as any);
       } else {
-        // Insert new profile row
-        const { error } = await supabase.from('profiles').insert({
-          profile_id: user.id,
-          username: cleanUsername,
-          full_name: fullName,
-          avatar_url: avatarUrl,
-          role: 'user',
-        });
-
-        if (error) throw error;
+        const userRole = user.user_metadata?.role || 'renter';
+        if (userRole === 'owner') {
+          const { error } = await supabase.from('owners').insert({
+            owner_id: user.id,
+            username: cleanUsername,
+            full_name: fullName,
+            avatar_url: avatarUrl
+          });
+          if (error) throw error;
+          router.replace('/(auth)/owner-verification' as any);
+        } else {
+          const { error } = await supabase.from('renters').insert({
+            renter_id: user.id,
+            username: cleanUsername,
+            full_name: fullName,
+            avatar_url: avatarUrl
+          });
+          if (error) throw error;
+          router.replace('/(tabs)/home' as any);
+        }
       }
-
-      // Navigate to home
-      router.replace('/(tabs)/home' as any);
     } catch (error: any) {
       if (error.message?.includes('unique') || error.code === '23505') {
         Alert.alert('Error', 'That username is already taken. Please choose another.');
