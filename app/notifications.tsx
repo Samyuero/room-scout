@@ -1,50 +1,21 @@
-import { useState, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import { View, Text, StyleSheet, FlatList, ActivityIndicator, Pressable, RefreshControl } from 'react-native';
-import { supabase } from '../src/lib/supabase';
 import { useAuth } from '../src/hooks/useAuth';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { AppColors } from '@/constants/theme';
+import { useNotifications } from '@/context/notification-context';
 
 export default function NotificationsScreen() {
   const router = useRouter();
   const { user } = useAuth();
-
-  const [notifications, setNotifications] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { notifications, loading, unreadCount, refreshUnreadCount, markAllRead } = useNotifications();
   const [refreshing, setRefreshing] = useState(false);
-
-  const fetchNotifications = async () => {
-    if (!user) return;
-    try {
-      const { data, error } = await supabase
-        .from('notifications')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
-      setNotifications(data || []);
-
-      // Mark all as read when opening notifications screen
-      if (data && data.some((n: any) => !n.read)) {
-        await supabase
-          .from('notifications')
-          .update({ read: true })
-          .eq('user_id', user.id)
-          .eq('read', false);
-      }
-    } catch (err) {
-      console.error('Error fetching notifications:', err);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  };
-
-  useEffect(() => {
-    if (user) {
-      fetchNotifications();
-    }
-  }, [user]);
+  const fetchNotifications = useCallback(async () => {
+    setRefreshing(true);
+    try { await refreshUnreadCount(); await markAllRead(); }
+    finally { setRefreshing(false); }
+  }, [refreshUnreadCount, markAllRead]);
+  useFocusEffect(useCallback(() => { if (unreadCount > 0) void markAllRead().catch(() => {}); }, [markAllRead, unreadCount]));
 
   const getBadgeStyle = (type: string) => {
     switch (type) {
@@ -77,7 +48,8 @@ export default function NotificationsScreen() {
       style={[styles.notificationCard, !item.read && styles.unreadCard]}
       onPress={async () => {
         if (item.related_dorm_id) {
-          router.push(`/(tabs)/${item.related_dorm_id}` as any);
+          if (item.type === 'rental_request') router.push({ pathname: '/owner-panel', params: { dormId: item.related_dorm_id } } as never);
+          else router.push(`/(tabs)/${item.related_dorm_id}` as never);
         }
       }}
     >
@@ -134,7 +106,7 @@ export default function NotificationsScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f8fafc',
+    backgroundColor: AppColors.background,
   },
   centered: {
     justifyContent: 'center',
@@ -146,12 +118,12 @@ const styles = StyleSheet.create({
     paddingBottom: 40,
   },
   notificationCard: {
-    backgroundColor: '#fff',
+    backgroundColor: AppColors.surface,
     borderRadius: 12,
     padding: 16,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: '#e2e8f0',
+    borderColor: AppColors.border,
     shadowColor: '#0f172a',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
@@ -160,7 +132,7 @@ const styles = StyleSheet.create({
   },
   unreadCard: {
     borderColor: '#bfdbfe',
-    backgroundColor: '#eff6ff',
+    backgroundColor: AppColors.surfaceElevated,
   },
   cardHeader: {
     flexDirection: 'row',
@@ -200,7 +172,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#f1f5f9',
   },
   infoBadgeText: {
-    color: '#475569',
+    color: AppColors.textSecondary,
   },
   timestamp: {
     fontSize: 12,
@@ -209,7 +181,7 @@ const styles = StyleSheet.create({
   cardTitle: {
     fontSize: 16,
     fontWeight: '700',
-    color: '#0f172a',
+    color: AppColors.text,
     marginBottom: 4,
   },
   cardMessage: {

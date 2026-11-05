@@ -49,6 +49,27 @@ export interface Dorm {
 export interface UserCoordinates {
   latitude: number;
   longitude: number;
+  accuracy_m?: number | null;
+}
+
+/** Private preferences belonging only to the signed-in renter. */
+export interface DormPreferences {
+  amenities?: string[];
+  utilities?: string[];
+  house_rules?: string[];
+  gender_policy?: string;
+  curfew?: string;
+  room_type?: string;
+  lgu_certified?: boolean;
+  furnished?: boolean;
+  budget_min?: number | null;
+  budget_max?: number | null;
+  preferred_location?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  radius_km?: number | null;
+  parking?: string | null;
+  pet_friendly?: boolean | null;
 }
 
 export interface DormFilters {
@@ -81,6 +102,6 @@ export const DEFAULT_DORM_FILTERS: DormFilters = {
   parkingRequired: false,
   roomTypes: [],
   curfewPolicy: '',
-  radiusKm: 10,
+  radiusKm: 5,
   onlyAvailable: true,
 };

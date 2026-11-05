@@ -1,8 +1,11 @@
 import { Image } from 'expo-image';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { AppColors, BorderRadius } from '@/constants/theme';
 import { formatPeso } from '@/lib/dorm-discovery';
 import type { Dorm } from '@/types/dorm';
+
+const APP_SESSION_STARTED_AT = Date.now();
 
 interface Props {
   dorm: Dorm;
@@ -10,9 +13,10 @@ interface Props {
   compared: boolean;
   onCompare: () => void;
   compact?: boolean;
+  showMatchScore?: boolean;
 }
 
-export function DormResultCard({ dorm, onPress, compared, onCompare, compact = false }: Props) {
+export function DormResultCard({ dorm, onPress, compared, onCompare, compact = false, showMatchScore = false }: Props) {
   const availability = dorm.availability_status || (dorm.available ? 'available' : 'unavailable');
   const statusColor =
     availability === 'available'
@@ -20,13 +24,15 @@ export function DormResultCard({ dorm, onPress, compared, onCompare, compact = f
       : availability === 'reserved'
         ? AppColors.warning
         : AppColors.error;
+  const createdAt = dorm.created_at ? new Date(dorm.created_at).getTime() : 0;
+  const isNewListing = createdAt > 0 && APP_SESSION_STARTED_AT - createdAt < 7 * 24 * 60 * 60 * 1000;
 
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`View ${dorm.name}`}
       onPress={onPress}
-      style={({ pressed }) => [styles.card, pressed && styles.pressed]}
+      style={({ pressed }) => [styles.card, !dorm.available && styles.unavailableCard, pressed && styles.pressed]}
     >
       <Image
         source={dorm.images[0] ? { uri: dorm.images[0] } : require('../../assets/placeholder.jpg')}
@@ -34,22 +40,26 @@ export function DormResultCard({ dorm, onPress, compared, onCompare, compact = f
         contentFit="cover"
         transition={180}
       />
+      {!dorm.available && <View pointerEvents="none" style={styles.unavailableOverlay} />}
+      {dorm.lgu_certified && <Pressable accessibilityLabel="LGU certification information" onPress={(event) => { event.stopPropagation(); Alert.alert('LGU certified', 'This listing has been marked as LGU certified by a RoomScout administrator.'); }} style={styles.certificationRibbon}><Ionicons name="ribbon" size={27} color={AppColors.accent} /></Pressable>}
       <View style={styles.content}>
         <View style={styles.titleRow}>
           <View style={styles.titleCopy}>
             <Text style={styles.name} numberOfLines={1}>{dorm.name}</Text>
             <Text style={styles.address} numberOfLines={1}>{dorm.address}</Text>
           </View>
-          <View style={styles.scoreBadge}>
-            <Text style={styles.score}>{dorm.ranking_score}</Text>
-            <Text style={styles.scoreLabel}>match</Text>
-          </View>
+          {showMatchScore && (
+            <View style={styles.scoreBadge}>
+              <Text style={styles.score}>{dorm.ranking_score}</Text>
+              <Text style={styles.scoreLabel}>Match Score</Text>
+            </View>
+          )}
         </View>
 
         <View style={styles.metrics}>
           <Text style={styles.price}>{formatPeso(dorm.price)}<Text style={styles.perMonth}> / month</Text></Text>
           <Text style={styles.rating}>
-            ★ {dorm.rating_average || 'New'} {dorm.rating_count > 0 ? `(${dorm.rating_count})` : ''}
+            {dorm.rating_count > 0 ? `★ ${dorm.rating_average} (${dorm.rating_count})` : 'No reviews yet'}
           </Text>
         </View>
 
@@ -59,7 +69,7 @@ export function DormResultCard({ dorm, onPress, compared, onCompare, compact = f
               {dorm.available && dorm.available_slots > 0 ? `${dorm.available_slots} left` : 'Unavailable'}
             </Text>
             {dorm.distance_km !== null && <Text style={styles.tag}>{dorm.distance_km} km</Text>}
-            {dorm.lgu_certified && <Text style={styles.tag}>LGU</Text>}
+            {isNewListing && <Text style={[styles.tag, styles.newTag]}>New</Text>}
           </View>
           <Pressable
             accessibilityRole="checkbox"
@@ -81,6 +91,10 @@ export function DormResultCard({ dorm, onPress, compared, onCompare, compact = f
 }
 
 const styles = StyleSheet.create({
+  unavailableCard: { opacity: 0.7 },
+  unavailableOverlay: { position: 'absolute', top: 0, left: 0, right: 0, height: 164, backgroundColor: 'rgba(15,23,42,0.3)' },
+  certificationRibbon: { position: 'absolute', top: 10, right: 10, padding: 8, borderRadius: 12, backgroundColor: AppColors.surface },
+
   card: {
     overflow: 'hidden',
     borderRadius: BorderRadius.lg,
@@ -107,7 +121,7 @@ const styles = StyleSheet.create({
     backgroundColor: AppColors.accentMuted,
   },
   score: { color: AppColors.white, fontSize: 16, fontWeight: '800', fontVariant: ['tabular-nums'] },
-  scoreLabel: { color: '#DBEAFE', fontSize: 9, textTransform: 'uppercase' },
+  scoreLabel: { color: '#DBEAFE', fontSize: 8, textTransform: 'uppercase' },
   metrics: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   price: { color: AppColors.accent, fontSize: 16, fontWeight: '700' },
   perMonth: { color: AppColors.textMuted, fontSize: 11, fontWeight: '500' },
@@ -125,6 +139,7 @@ const styles = StyleSheet.create({
     textTransform: 'capitalize',
     overflow: 'hidden',
   },
+  newTag: { color: AppColors.warning, borderColor: AppColors.warning },
   compareButton: {
     borderWidth: 1,
     borderColor: AppColors.accent,

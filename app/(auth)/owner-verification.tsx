@@ -1,14 +1,19 @@
+import { AppColors } from '@/constants/theme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { showError } from '@/components/error-toast';
 import { useState } from 'react';
 import { View, Text, StyleSheet, Pressable, ActivityIndicator, Alert, Image, ScrollView } from 'react-native';
 import { useRouter } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '../../src/lib/supabase';
 import { useAuth } from '../../src/hooks/useAuth';
-import { uploadImage } from '../../src/utils/imageUpload';
+import { getSafeImageExtension, uploadPrivateImage } from '../../src/utils/imageUpload';
 
 export default function OwnerVerification() {
   const router = useRouter();
   const { user } = useAuth();
+  const insets = useSafeAreaInsets();
   const [imageUri, setImageUri] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -16,12 +21,12 @@ export default function OwnerVerification() {
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Permission Denied', 'Gallery access is required to select your verification photo.');
+        showError('Permission Denied', 'Gallery access is required to select your verification photo.');
         return;
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: ['images'],
         allowsEditing: false,
         quality: 0.8,
       });
@@ -31,13 +36,13 @@ export default function OwnerVerification() {
       }
     } catch (err: any) {
       console.error('Error picking document photo:', err);
-      Alert.alert('Error', 'Failed to pick photo from gallery.');
+      showError('Error', 'Failed to pick photo from gallery.');
     }
   };
 
   const handleSubmit = async () => {
     if (!imageUri) {
-      Alert.alert('Photo Required', 'Please select a photo of your government ID or business permit from your gallery.');
+      showError('Photo Required', 'Please select a photo of your government ID or business permit from your gallery.');
       return;
     }
 
@@ -46,13 +51,13 @@ export default function OwnerVerification() {
       if (!user) throw new Error('Not authenticated');
 
       // Upload image to Supabase Storage
-      const fileExt = imageUri.split('.').pop()?.toLowerCase() || 'jpg';
+      const fileExt = getSafeImageExtension(imageUri);
       const fileName = `${user.id}/verifications/${Date.now()}.${fileExt}`;
-      const publicUrl = await uploadImage(fileName, imageUri);
+      const protectedPath = await uploadPrivateImage(fileName, imageUri);
 
       const { error } = await supabase.from('owner_verifications').insert({
         user_id: user.id,
-        document_url: publicUrl,
+        document_url: protectedPath,
         status: 'pending',
       });
 
@@ -65,7 +70,7 @@ export default function OwnerVerification() {
       );
     } catch (err: any) {
       console.error(err);
-      Alert.alert('Error', err.message || 'Failed to submit verification.');
+      showError('Error', err.message || 'Failed to submit verification.');
     } finally {
       setLoading(false);
     }
@@ -76,7 +81,7 @@ export default function OwnerVerification() {
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
+    <ScrollView style={{ backgroundColor: AppColors.background }} contentContainerStyle={[styles.container, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 24 }]} contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled">
       <Text style={styles.title}>Dorm Owner Verification</Text>
       <Text style={styles.subtitle}>
         To list your dormitories, we need to verify your identity. Please select a clear photo of your valid government ID or business permit from your gallery.
@@ -94,7 +99,7 @@ export default function OwnerVerification() {
           </View>
         ) : (
           <Pressable style={styles.pickPhotoButton} onPress={pickDocumentImage} disabled={loading}>
-            <Text style={styles.pickPhotoText}>📷 Choose Photo from Gallery</Text>
+            <Ionicons name="image-outline" size={28} color={AppColors.accent} /><Text style={styles.pickPhotoText}>Choose verification photo</Text>
           </Pressable>
         )}
       </View>
@@ -133,20 +138,20 @@ const styles = StyleSheet.create({
   container: {
     flexGrow: 1,
     padding: 24,
-    backgroundColor: '#fff',
+    backgroundColor: AppColors.background,
     justifyContent: 'center',
   },
   title: {
     fontSize: 26,
     fontWeight: 'bold',
     textAlign: 'center',
-    color: '#333',
+    color: AppColors.text,
     marginBottom: 12,
   },
   subtitle: {
     fontSize: 15,
     textAlign: 'center',
-    color: '#666',
+    color: AppColors.textSecondary,
     marginBottom: 28,
     lineHeight: 22,
   },
@@ -157,12 +162,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     marginBottom: 12,
-    color: '#333',
+    color: AppColors.text,
   },
   pickPhotoButton: {
-    backgroundColor: '#f1f5f9',
+    backgroundColor: AppColors.surfaceElevated,
     borderWidth: 2,
-    borderColor: '#cbd5e1',
+    borderColor: AppColors.border,
     borderStyle: 'dashed',
     borderRadius: 12,
     padding: 28,
@@ -172,16 +177,16 @@ const styles = StyleSheet.create({
   pickPhotoText: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#2563eb',
+    color: AppColors.accent,
   },
   imagePreviewContainer: {
     alignItems: 'center',
     borderRadius: 12,
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: '#e2e8f0',
+    borderColor: AppColors.borderSubtle,
     padding: 8,
-    backgroundColor: '#f8fafc',
+    backgroundColor: AppColors.surface,
   },
   imagePreview: {
     width: '100%',
@@ -193,26 +198,26 @@ const styles = StyleSheet.create({
     marginTop: 10,
     paddingVertical: 8,
     paddingHorizontal: 16,
-    backgroundColor: '#e2e8f0',
+    backgroundColor: AppColors.borderSubtle,
     borderRadius: 6,
   },
   changePhotoText: {
-    color: '#334155',
+    color: AppColors.textSecondary,
     fontWeight: '600',
     fontSize: 14,
   },
   submitButton: {
-    backgroundColor: '#007AFF',
+    backgroundColor: AppColors.accent,
     padding: 16,
     borderRadius: 10,
     alignItems: 'center',
     marginBottom: 16,
   },
   submitButtonDisabled: {
-    backgroundColor: '#94a3b8',
+    backgroundColor: AppColors.textMuted,
   },
   submitButtonText: {
-    color: '#fff',
+    color: AppColors.white,
     fontSize: 17,
     fontWeight: 'bold',
   },
@@ -221,7 +226,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   skipButtonText: {
-    color: '#007AFF',
+    color: AppColors.accent,
     fontSize: 16,
     fontWeight: '600',
   },

@@ -1,19 +1,25 @@
-import { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, FlatList, ActivityIndicator, Pressable, Alert, Modal, TextInput, ScrollView, Linking, Image } from 'react-native';
+import { ProtectedRequestDocuments } from '@/components/protected-request-documents';
+import { ErrorToast, showError } from '@/components/error-toast';
+import { useState, useEffect, useCallback } from 'react';
+import { View, Text, StyleSheet, FlatList, ActivityIndicator, Pressable, Alert, Modal, TextInput, ScrollView, Image } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { AppColors } from '@/constants/theme';
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '../src/lib/supabase';
 import { useAuth } from '../src/hooks/useAuth';
-import { useRouter } from 'expo-router';
-import { getPrivateDocumentUrl, uploadImage } from '@/utils/imageUpload';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { getSafeImageExtension, uploadPrivateImage } from '@/utils/imageUpload';
 
 export default function OwnerPanelScreen() {
   const router = useRouter();
   const { user } = useAuth();
+  const params = useLocalSearchParams<{ dormId?: string; tab?: string }>();
 
   const [isOwner, setIsOwner] = useState<boolean | null>(null);
   const [loadingRole, setLoadingRole] = useState(true);
-  const [activeTab, setActiveTab] = useState<'requests' | 'tenants'>('requests');
+  const [activeTab, setActiveTab] = useState<'requests' | 'tenants'>(params.tab === 'tenants' ? 'tenants' : 'requests');
 
+  const [expandedRequests, setExpandedRequests] = useState<string[]>([]);
   const [rentalRequests, setRentalRequests] = useState<any[]>([]);
   const [tenants, setTenants] = useState<any[]>([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -36,12 +42,12 @@ export default function OwnerPanelScreen() {
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Permission Denied', 'Gallery access is required to pick the payment QR image.');
+        showError('Permission Denied', 'Gallery access is required to pick the payment QR image.');
         return;
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: ['images'],
         allowsEditing: false,
         quality: 0.8,
       });
@@ -49,8 +55,8 @@ export default function OwnerPanelScreen() {
       if (!result.canceled && result.assets && result.assets.length > 0) {
         setOwnerQrUrl(result.assets[0].uri);
       }
-    } catch (err) {
-      Alert.alert('Error', 'Failed to pick QR code image.');
+    } catch {
+      showError('Error', 'Failed to pick QR code image.');
     }
   };
 
@@ -58,12 +64,12 @@ export default function OwnerPanelScreen() {
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Permission Denied', 'Gallery access is required to pick the contract photo.');
+        showError('Permission Denied', 'Gallery access is required to pick the contract photo.');
         return;
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: ['images'],
         allowsEditing: false,
         quality: 0.8,
       });
@@ -71,12 +77,12 @@ export default function OwnerPanelScreen() {
       if (!result.canceled && result.assets && result.assets.length > 0) {
         setContractUrl(result.assets[0].uri);
       }
-    } catch (err) {
-      Alert.alert('Error', 'Failed to pick contract document photo.');
+    } catch {
+      showError('Error', 'Failed to pick contract document photo.');
     }
   };
 
-  const checkOwnerRole = async () => {
+  const checkOwnerRole = useCallback(async () => {
     if (!user) {
       setIsOwner(false);
       setLoadingRole(false);
@@ -98,11 +104,11 @@ export default function OwnerPanelScreen() {
     } finally {
       setLoadingRole(false);
     }
-  };
+  }, [user]);
 
   useEffect(() => {
-    checkOwnerRole();
-  }, [user]);
+    void checkOwnerRole();
+  }, [checkOwnerRole]);
 
   const fetchOwnerDorms = async () => {
     if (!user) return;
@@ -127,172 +133,79 @@ export default function OwnerPanelScreen() {
 
   const handleAddOfflineTenant = async () => {
     if (!selectedDormId) {
-      Alert.alert('Selection Error', 'Please select an available dormitory.');
+      showError('Selection Error', 'Please select an available dormitory.');
       return;
     }
     if (!offlineName.trim()) {
-      Alert.alert('Input Error', 'Please enter the renter\'s name.');
+      showError('Input Error', 'Please enter the renter\'s name.');
       return;
     }
 
+    if (offlineName.trim().length > 120 || (offlinePhone.trim() && !/^\+?[0-9][0-9 ()-]{6,19}$/.test(offlinePhone.trim()))) {
+      showError('Check tenant details', 'Use a name under 120 characters and a valid contact number.');
+      return;
+    }
     setAddingRenter(true);
     try {
-      // Try inserting into rentals table (which user will add soon)
-      const { error: insertError } = await supabase
-        .from('rentals')
-        .insert({
-          dorm_id: selectedDormId,
-          renter_name: offlineName.trim(),
-          renter_phone: offlinePhone.trim() || null,
-          status: 'active',
-          start_date: new Date().toISOString(),
-        });
-
-      if (insertError) {
-        // Handle fallback if database additions haven't been run yet
-        if (insertError.message.includes('relation') || insertError.code === '42P01') {
-          Alert.alert(
-            'Database Update Required',
-            'To add offline tenants, please apply the SQL Query for Database Additions in your Supabase dashboard first.'
-          );
-          return;
-        }
-        throw insertError;
-      }
-
-      // Update dorm availability to false
-      const { error: dormError } = await supabase
-        .from('dorms')
-        .update({ available: false, updated_at: new Date().toISOString() })
-        .eq('dorm_id', selectedDormId);
-
-      if (dormError) throw dormError;
-
-      Alert.alert('Success', 'Offline tenant added and dorm marked as unavailable.');
+      const { error } = await supabase.rpc('owner_add_offline_tenant', {
+        p_dorm_id: selectedDormId,
+        p_renter_name: offlineName.trim(),
+        p_renter_phone: offlinePhone.trim() || null,
+      });
+      if (error) throw error;
+      Alert.alert('Tenant added', 'The tenant list and available slots have been updated.');
       setIsAddModalVisible(false);
       setOfflineName('');
       setOfflinePhone('');
       fetchData(); // Refresh list
     } catch (err: any) {
-      Alert.alert('Error Adding Tenant', err.message);
+      showError('Error Adding Tenant', err.message);
     } finally {
       setAddingRenter(false);
     }
   };
 
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     if (isOwner !== true) return;
     setRefreshing(true);
     try {
-      if (activeTab === 'requests') {
-        const { data: requestsData, error: reqError } = await supabase
-          .from('rental_requests')
-          .select('*, dorms:dorm_id (name, price, reservation_fee)')
-          .eq('owner_id', user!.id)
-          .in('status', ['pending', 'payment_submitted', 'refund_requested'])
-          .order('created_at', { ascending: false });
-
-        if (reqError) throw reqError;
-
-        if (!requestsData || requestsData.length === 0) {
-          setRentalRequests([]);
-          return;
-        }
-
-        // Get unique user IDs and fetch renter profiles
-        const userIds = [...new Set(requestsData.map((r: any) => r.user_id))];
-        const { data: rentersData, error: profError } = await supabase
-          .from('renters')
-          .select('renter_id, full_name, username, avatar_url')
-          .in('renter_id', userIds.length > 0 ? userIds : ['00000000-0000-0000-0000-000000000000']);
-
-        if (profError) throw profError;
-
-        const renterMap: Record<string, any> = {};
-        (rentersData || []).forEach((p: any) => { renterMap[p.renter_id] = p; });
-
-        const merged = requestsData.map((req: any) => ({
-          ...req,
-          profiles: renterMap[req.user_id] || null,
-        }));
-
-        setRentalRequests(merged);
-      } else {
-        // Fetch active rentals from 'rentals' table
-        try {
-          const { data: rentalsData, error: rentError } = await supabase
-            .from('rentals')
-            .select('*, dorms!inner(name, owner_id), renters(renter_id, full_name, username, avatar_url)')
-            .eq('dorms.owner_id', user!.id)
-            .eq('status', 'active')
-            .order('start_date', { ascending: false });
-
-          if (rentError) {
-            // Check if rentals table doesn't exist
-            if (rentError.message.includes('relation') || rentError.code === '42P01') {
-              throw new Error('fallback');
-            }
-            throw rentError;
-          }
-
-          setTenants(rentalsData || []);
-        } catch (fallbackErr) {
-          // Fallback to old behavior using rental_requests (status='accepted')
-          const { data: requestsData, error: reqError } = await supabase
-            .from('rental_requests')
-            .select('*, dorms:dorm_id (name)')
-            .eq('owner_id', user!.id)
-            .eq('status', 'accepted')
-            .order('updated_at', { ascending: false });
-
-          if (reqError) throw reqError;
-
-          if (!requestsData || requestsData.length === 0) {
-            setTenants([]);
-            return;
-          }
-
-          const userIds = [...new Set(requestsData.map((r: any) => r.user_id))];
-          const { data: rentersData, error: profError } = await supabase
-            .from('renters')
-            .select('id, full_name, username, avatar_url')
-            .in('id', userIds.length > 0 ? userIds : ['00000000-0000-0000-0000-000000000000']);
-
-          if (profError) throw profError;
-
-          const renterMap: Record<string, any> = {};
-          (rentersData || []).forEach((p: any) => { renterMap[p.id] = p; });
-
-          const merged = requestsData.map((req: any) => ({
-            ...req,
-            dorm_id: req.dorm_id,
-            user_id: req.user_id,
-            renter_name: renterMap[req.user_id]?.full_name || 'Registered User',
-            renter_phone: null,
-            start_date: req.updated_at,
-            dorms: req.dorms,
-            profiles: renterMap[req.user_id] || null,
-          }));
-
-          setTenants(merged);
-        }
-      }
+      const { data, error } = await supabase.rpc('get_owner_rental_dashboard', { p_dorm_id: params.dormId || null });
+      if (error) throw error;
+      setRentalRequests((data?.requests || []).filter((request: any) => !['approved', 'reserved', 'rejected', 'refund_completed'].includes(request.status)));
+      setTenants(data?.tenants || []);
     } catch (err: any) {
-      Alert.alert('Error Fetching Data', err.message);
+      showError('Error Fetching Data', err.message);
     } finally {
       setRefreshing(false);
     }
-  };
+  }, [isOwner, params.dormId]);
 
+  useFocusEffect(useCallback(() => { if (isOwner) void fetchData(); }, [fetchData, isOwner]));
   useEffect(() => {
-    if (isOwner === true) {
-      fetchData();
-    }
-  }, [isOwner, activeTab]);
+    if (!user?.id || !isOwner) return;
+    const channel = supabase.channel('owner-workflow-' + user.id + '-' + Date.now())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'rental_requests', filter: 'owner_id=eq.' + user.id }, () => void fetchData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'rentals' }, () => void fetchData())
+      .subscribe();
+    return () => { void supabase.removeChannel(channel); };
+  }, [user?.id, isOwner, fetchData]);
 
   const handleDecision = async (requestId: string, approve: boolean, userId: string, dormName: string, dormId: string) => {
     if (approve) {
       const request = rentalRequests.find((item) => item.request_id === requestId);
+      if (request?.payment_method === 'cash') {
+        setActionLoading(requestId);
+        try {
+          const { error } = await supabase.rpc('owner_accept_cash_request', { p_request_id: requestId });
+          if (error) throw error;
+          await fetchData();
+          Alert.alert('Cash request accepted', 'The request is pending until you confirm cash was received.');
+        } catch (error: any) {
+          showError('Could not accept request', error.message || 'Check your connection and try again.');
+          await fetchData();
+        } finally { setActionLoading(null); }
+        return;
+      }
       setAcceptingRequest(request);
       setRequiredAmount(String(request?.request_type === 'reservation' ? request?.dorms?.reservation_fee || '' : request?.dorms?.price || ''));
       setOwnerQrUrl('');
@@ -307,14 +220,14 @@ export default function OwnerPanelScreen() {
       const { error } = await supabase
         .from('rental_requests')
         .update({ status: newStatus, updated_at: new Date().toISOString() })
-        .eq('request_id', requestId);
+        .eq('request_id', requestId).eq('owner_id', user!.id).eq('status', 'pending').select('request_id').single();
 
       if (error) throw error;
 
       Alert.alert('Success', `Rental request has been ${newStatus}.`);
       setRentalRequests(prev => prev.filter(item => item.request_id !== requestId));
     } catch (err: any) {
-      Alert.alert('Error', err.message);
+      showError('Error', err.message);
     } finally {
       setActionLoading(null);
     }
@@ -323,8 +236,8 @@ export default function OwnerPanelScreen() {
   const submitAcceptance = async () => {
     if (!acceptingRequest) return;
     const amount = Number(requiredAmount);
-    if (!Number.isFinite(amount) || amount <= 0 || !ownerQrUrl.trim() || !contractUrl.trim()) {
-      Alert.alert('Missing acceptance details', 'Please enter a valid amount and select both the QR photo and Contract photo from gallery.');
+    if (!Number.isFinite(amount) || amount <= 0 || (acceptingRequest.payment_method !== 'cash' && !ownerQrUrl.trim()) || !contractUrl.trim()) {
+      showError('Missing acceptance details', 'Enter a valid amount and select the contract. QR payments also require a QR image.');
       return;
     }
 
@@ -336,16 +249,16 @@ export default function OwnerPanelScreen() {
 
       // Upload QR photo to Supabase Storage if selected from local gallery
       if (ownerQrUrl.startsWith('file:') || ownerQrUrl.startsWith('content:')) {
-        const ext = ownerQrUrl.split('.').pop()?.toLowerCase() || 'jpg';
+        const ext = getSafeImageExtension(ownerQrUrl);
         const fileName = `${user!.id}/qrcodes/${Date.now()}.${ext}`;
-        finalQrUrl = await uploadImage(fileName, ownerQrUrl);
+        finalQrUrl = await uploadPrivateImage(fileName, ownerQrUrl);
       }
 
       // Upload Contract photo to Supabase Storage if selected from local gallery
       if (contractUrl.startsWith('file:') || contractUrl.startsWith('content:')) {
-        const ext = contractUrl.split('.').pop()?.toLowerCase() || 'jpg';
+        const ext = getSafeImageExtension(contractUrl);
         const fileName = `${user!.id}/contracts/${Date.now()}.${ext}`;
-        finalContractUrl = await uploadImage(fileName, contractUrl);
+        finalContractUrl = await uploadPrivateImage(fileName, contractUrl);
       }
 
       const { error } = await supabase
@@ -358,14 +271,15 @@ export default function OwnerPanelScreen() {
           updated_at: new Date().toISOString(),
         })
         .eq('request_id', acceptingRequest.request_id)
-        .eq('owner_id', user!.id);
+        .eq('owner_id', user!.id).eq('status', 'pending').select('request_id').single();
       if (error) throw error;
 
-      setRentalRequests((current) => current.filter((item) => item.request_id !== acceptingRequest.request_id));
       setAcceptingRequest(null);
-      Alert.alert('Payment step opened', 'The renter can now review the contract, scan your QR, and submit proof.');
+      await fetchData();
+      Alert.alert('Payment step opened', 'The renter can now review the contract and follow their selected payment method.');
     } catch (err: any) {
-      Alert.alert('Could not accept request', err.message || 'Please try again.');
+      showError('Could not accept request', err.code === 'PGRST116' ? 'This request has changed or was cancelled. The list will refresh.' : err.message || 'Please try again.');
+      await fetchData();
     } finally {
       setActionLoading(null);
       setUploadingAcceptance(false);
@@ -384,63 +298,12 @@ export default function OwnerPanelScreen() {
           onPress: async () => {
             setActionLoading(rentalId);
             try {
-              // Try updating the rentals table first
-              let rentalsUpdated = false;
-              try {
-                const { error: rentError } = await supabase
-                  .from('rentals')
-                  .update({ status: 'past', end_date: new Date().toISOString(), updated_at: new Date().toISOString() })
-                  .eq('rental_id', rentalId);
-                
-                if (rentError) {
-                  if (rentError.message.includes('relation') || rentError.code === '42P01') {
-                    throw new Error('fallback');
-                  }
-                  throw rentError;
-                }
-                rentalsUpdated = true;
-              } catch (fallbackErr) {
-                // If rentals table doesn't exist, we fallback to deleting from rental_requests
-                const { error } = await supabase
-                  .from('rental_requests')
-                  .delete()
-                  .eq('request_id', rentalId); // In fallback mode, rentalId is actually the request id
-
-                if (error) throw error;
-              }
-
-              // Make dorm available again
-              const { error: dormError } = await supabase
-                .from('dorms')
-                .update({ available: true })
-                .eq('dorm_id', dormId);
-
-              if (dormError) throw dormError;
-
-              // If rentals table exists and there is a registered user, cleanup their rental request too
-              if (rentalsUpdated && userId) {
-                await supabase
-                  .from('rental_requests')
-                  .delete()
-                  .eq('dorm_id', dormId)
-                  .eq('user_id', userId);
-              }
-
-              // Notify the user if registered
-              if (userId) {
-                await supabase.from('notifications').insert({
-                  user_id: userId,
-                  title: 'Rental Agreement Ended',
-                  message: `Your rental agreement for "${dormName}" has been ended by the owner.`,
-                  type: 'info',
-                  related_dorm_id: dormId,
-                });
-              }
-
+              const { error } = await supabase.rpc('owner_end_rental', { p_rental_id: rentalId });
+              if (error) throw error;
               Alert.alert('Success', 'Rental agreement ended and tenant removed.');
               setTenants(prev => prev.filter(item => (item.rental_id || item.request_id) !== rentalId));
             } catch (err: any) {
-              Alert.alert('Error', err.message);
+              showError('Error', err.message);
             } finally {
               setActionLoading(null);
             }
@@ -448,6 +311,19 @@ export default function OwnerPanelScreen() {
         }
       ]
     );
+  };
+
+  const confirmCashPayment = async (requestId: string) => {
+    setActionLoading(requestId);
+    try {
+      const { error } = await supabase.rpc('owner_confirm_cash_payment', { p_request_id: requestId });
+      if (error) throw error;
+    } catch (error: any) {
+      showError('Confirmation failed', error.message || 'Check your connection and refresh this request.');
+    } finally {
+      await fetchData();
+      setActionLoading(null);
+    }
   };
 
   if (loadingRole) {
@@ -473,65 +349,36 @@ export default function OwnerPanelScreen() {
     );
   }
 
-  const renderRequestItem = ({ item }: { item: any }) => (
-    <View style={styles.card}>
-      <View style={styles.cardInfo}>
-        <Text style={styles.cardTitle}>{item.profiles?.full_name || 'Anonymous User'}</Text>
-        <Text style={styles.cardSubtitle}>@{item.profiles?.username || 'username'}</Text>
-        <Text style={styles.cardDorm}>Dormitory: <Text style={styles.boldText}>{item.dorms?.name}</Text></Text>
-        <Text style={styles.cardDetail}>Requested on: {new Date(item.created_at).toLocaleDateString()}</Text>
-
-        {/* New Document Fields */}
-        <View style={styles.documentContainer}>
-          <Text style={styles.documentLabel}>Valid ID:</Text>
-          <Pressable disabled={!item.renter_gov_id_url} onPress={async () => Linking.openURL(await getPrivateDocumentUrl(item.renter_gov_id_url))}><Text style={styles.documentLink}>{item.renter_gov_id_url ? 'Open protected government ID' : 'Not provided'}</Text></Pressable>
-
-          <Text style={styles.documentLabel}>Payment Proof:</Text>
-          <Pressable disabled={!item.payment_proof_url} onPress={async () => Linking.openURL(await getPrivateDocumentUrl(item.payment_proof_url))}><Text style={styles.documentLink}>{item.payment_proof_url ? 'Open protected payment proof' : 'Not provided'}</Text></Pressable>
-
-          {item.message ? (
-            <>
-              <Text style={styles.documentLabel}>Details:</Text>
-              <Text style={styles.documentText}>{item.message}</Text>
-            </>
-          ) : null}
-        </View>
-      </View>
-      {item.status === 'pending' ? <View style={styles.buttonRow}>
-        <Pressable
-          style={[styles.actionBtn, styles.approveBtn, actionLoading === item.request_id && styles.disabledBtn]}
-          onPress={() => handleDecision(item.request_id, true, item.user_id, item.dorms?.name, item.dorm_id)}
-          disabled={actionLoading !== null}
-        >
-          <Text style={styles.actionBtnText}>Accept</Text>
-        </Pressable>
-        <Pressable
-          style={[styles.actionBtn, styles.rejectBtn, actionLoading === item.request_id && styles.disabledBtn]}
-          onPress={() => handleDecision(item.request_id, false, item.user_id, item.dorms?.name, item.dorm_id)}
-          disabled={actionLoading !== null}
-        >
-          <Text style={styles.actionBtnText}>Decline</Text>
-        </Pressable>
-      </View> : (
-        <View style={styles.documentContainer}>
-          <Text style={styles.documentLabel}>Current step:</Text>
-          <Text style={styles.documentText}>{item.status === 'payment_submitted' ? 'Payment proof ready for admin verification' : 'Refund requested by renter'}</Text>
-        </View>
-      )}
-    </View>
-  );
+  const renderRequestItem = ({ item }: { item: any }) => {
+    const expanded = expandedRequests.includes(item.request_id);
+    return <View style={styles.card}>
+      <Pressable accessibilityLabel="Expand request details" onPress={() => setExpandedRequests((current) => expanded ? current.filter((id) => id !== item.request_id) : [...current, item.request_id])} style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+        <View style={{ flex: 1 }}><Text style={styles.cardTitle}>{item.profiles?.full_name || 'Renter'}</Text><Text style={styles.cardSubtitle}>@{item.profiles?.username || 'renter'}</Text><Text style={styles.cardDorm}>Dormitory: {item.dorms?.name}</Text><Text style={styles.cardDetail}>{new Date(item.created_at).toLocaleDateString()}</Text></View>
+        <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={22} color={AppColors.textSecondary} />
+      </Pressable>
+      {item.status === 'cancelled' && <Text style={styles.cardDetail}>Cancelled · {item.payment_status === 'pending_verification' ? 'Receipt awaiting review' : item.payment_status === 'paid' ? 'Payment recorded' : 'Closed'}</Text>}
+      {expanded && <View style={{ gap: 14, paddingTop: 18 }}>
+        <Text style={styles.documentText}>{item.payment_method === 'cash' ? 'Cash in person' : 'QR payment'} · {item.status === 'awaiting_cash' ? 'Pending cash payment' : item.status.replace(/_/g, ' ')}</Text>
+        {item.status === 'cancelled' && <Text style={styles.documentText}>Cancelled by the renter. {item.payment_status === 'pending_verification' ? 'The submitted receipt remains in the admin review queue. ' : item.payment_status === 'paid' ? 'Payment was recorded before cancellation. ' : ''}No refund is issued by RoomScout. Any payment return must be arranged directly outside this app.</Text>}
+        <ProtectedRequestDocuments requestId={item.request_id} idPath={item.renter_gov_id_url || ''} paymentPath={item.payment_proof_url} onOpen={(document) => router.push({ pathname: '/view-id', params: { requestId: item.request_id, document } } as never)} />
+        {item.message ? <Text style={styles.documentText}>{item.message}</Text> : null}
+        {item.status === 'pending' && <View style={styles.buttonRow}><Pressable disabled={actionLoading !== null} style={[styles.actionBtn, styles.approveBtn]} onPress={() => handleDecision(item.request_id, true, item.user_id, item.dorms?.name, item.dorm_id)}><Text style={styles.actionBtnText}>Accept</Text></Pressable><Pressable disabled={actionLoading !== null} style={[styles.actionBtn, styles.rejectBtn]} onPress={() => handleDecision(item.request_id, false, item.user_id, item.dorms?.name, item.dorm_id)}><Text style={styles.actionBtnText}>Decline</Text></Pressable></View>}
+        {item.status === 'awaiting_cash' && <Pressable disabled={actionLoading !== null} style={[styles.actionBtn, styles.approveBtn]} onPress={() => Alert.alert('Confirm cash received?', 'Confirm only after receiving the payment in person. This records the tenancy and updates available slots.', [{ text: 'Not yet', style: 'cancel' }, { text: 'Confirm payment', onPress: () => void confirmCashPayment(item.request_id) }])}><Text style={styles.actionBtnText}>Confirm cash received</Text></Pressable>}
+      </View>}
+    </View>;
+  };
 
   const renderTenantItem = ({ item }: { item: any }) => {
     const isOffline = !item.user_id;
-    const displayName = isOffline ? `${item.renter_name} (Offline)` : (item.profiles?.full_name || item.renter_name || 'Registered User');
-    const subtitleText = isOffline ? `Phone: ${item.renter_phone || 'None'}` : `@${item.profiles?.username || 'username'}`;
+    const displayName = isOffline ? `${item.renter_name} (Offline)` : (item.renters?.full_name || item.profiles?.full_name || item.renter_name || 'Registered User');
+    const subtitleText = isOffline ? `Phone: ${item.renter_phone || 'None'}` : `@${item.renters?.username || item.profiles?.username || 'renter'}`;
     const agreementStart = item.start_date || item.updated_at;
 
     return (
       <View style={styles.card}>
         <View style={styles.cardInfo}>
           <Text style={styles.cardTitle}>{displayName}</Text>
-          <Text style={[styles.cardSubtitle, isOffline && { color: '#64748b' }]}>{subtitleText}</Text>
+          <Text style={[styles.cardSubtitle, isOffline && { color: AppColors.textSecondary }]}>{subtitleText}</Text>
           <Text style={styles.cardDorm}>Renting: <Text style={styles.boldText}>{item.dorms?.name}</Text></Text>
           <Text style={styles.cardDetail}>Agreement Start: {new Date(agreementStart).toLocaleDateString()}</Text>
         </View>
@@ -548,22 +395,25 @@ export default function OwnerPanelScreen() {
 
   return (
     <View style={styles.container}>
+      {params.dormId && <Pressable onPress={() => router.setParams({ dormId: '' })} style={{ padding: 14 }}><Text style={{ color: '#007AFF' }}>Showing this dorm · Show all dorms</Text></Pressable>}
       {/* Tabs */}
       <View style={styles.tabContainer}>
         <Pressable 
           style={[styles.tab, activeTab === 'requests' && styles.activeTab]}
           onPress={() => setActiveTab('requests')}
         >
+          <Ionicons name="file-tray-outline" size={20} color={AppColors.accent} />
           <Text style={[styles.tabText, activeTab === 'requests' && styles.activeTabText]}>
-            Rental Requests ({rentalRequests.length})
+            Requests ({rentalRequests.length})
           </Text>
         </Pressable>
         <Pressable 
           style={[styles.tab, activeTab === 'tenants' && styles.activeTab]}
           onPress={() => setActiveTab('tenants')}
         >
+          <Ionicons name="people-outline" size={20} color={AppColors.accent} />
           <Text style={[styles.tabText, activeTab === 'tenants' && styles.activeTabText]}>
-            Current Tenants ({tenants.length})
+            Tenants ({tenants.length})
           </Text>
         </Pressable>
       </View>
@@ -609,7 +459,7 @@ export default function OwnerPanelScreen() {
               <Text style={styles.modalTitle}>Accept & send payment details</Text>
 
               <Text style={styles.formLabel}>Required amount (₱)</Text>
-              <TextInput
+              <TextInput placeholderTextColor={AppColors.placeholder}
                 style={styles.input}
                 keyboardType="decimal-pad"
                 value={requiredAmount}
@@ -617,6 +467,7 @@ export default function OwnerPanelScreen() {
                 placeholder="Amount in PHP"
               />
 
+              {acceptingRequest?.payment_method !== 'cash' && <>
               <Text style={styles.formLabel}>Payment QR Code Photo</Text>
               {ownerQrUrl ? (
                 <View style={styles.imagePickerPreviewBox}>
@@ -627,10 +478,11 @@ export default function OwnerPanelScreen() {
                 </View>
               ) : (
                 <Pressable style={styles.pickGalleryBtn} onPress={pickQrImage}>
-                  <Text style={styles.pickGalleryBtnText}>📷 Select QR Photo from Gallery</Text>
+                  <Text style={styles.pickGalleryBtnText}>Select QR image</Text>
                 </Pressable>
               )}
 
+              </>}
               <Text style={styles.formLabel}>Contract Document Photo</Text>
               {contractUrl ? (
                 <View style={styles.imagePickerPreviewBox}>
@@ -641,7 +493,7 @@ export default function OwnerPanelScreen() {
                 </View>
               ) : (
                 <Pressable style={styles.pickGalleryBtn} onPress={pickContractImage}>
-                  <Text style={styles.pickGalleryBtnText}>📄 Select Contract Photo from Gallery</Text>
+                  <Text style={styles.pickGalleryBtnText}>Select contract image</Text>
                 </Pressable>
               )}
 
@@ -672,6 +524,7 @@ export default function OwnerPanelScreen() {
             </View>
           </View>
         </View>
+        <ErrorToast />
       </Modal>
 
       {/* Add Offline Tenant Modal */}
@@ -707,7 +560,7 @@ export default function OwnerPanelScreen() {
               )}
 
               <Text style={styles.formLabel}>Tenant Name</Text>
-              <TextInput
+              <TextInput placeholderTextColor={AppColors.placeholder}
                 style={styles.input}
                 placeholder="Enter tenant's full name"
                 value={offlineName}
@@ -715,7 +568,7 @@ export default function OwnerPanelScreen() {
               />
 
               <Text style={styles.formLabel}>Tenant Phone Number</Text>
-              <TextInput
+              <TextInput placeholderTextColor={AppColors.placeholder}
                 style={styles.input}
                 placeholder="Enter phone number (optional)"
                 value={offlinePhone}
@@ -753,6 +606,7 @@ export default function OwnerPanelScreen() {
             </View>
           </View>
         </View>
+        <ErrorToast />
       </Modal>
     </View>
   );
@@ -761,7 +615,7 @@ export default function OwnerPanelScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f8fafc',
+    backgroundColor: AppColors.background,
   },
   centered: {
     justifyContent: 'center',
@@ -771,7 +625,7 @@ const styles = StyleSheet.create({
   loadingText: {
     marginTop: 12,
     fontSize: 16,
-    color: '#64748b',
+    color: AppColors.textSecondary,
     fontWeight: '500',
   },
   deniedTitle: {
@@ -782,7 +636,7 @@ const styles = StyleSheet.create({
   },
   deniedText: {
     fontSize: 16,
-    color: '#64748b',
+    color: AppColors.textSecondary,
     textAlign: 'center',
     marginBottom: 24,
     lineHeight: 24,
@@ -800,7 +654,7 @@ const styles = StyleSheet.create({
   },
   tabContainer: {
     flexDirection: 'row',
-    backgroundColor: '#fff',
+    backgroundColor: AppColors.surface,
     borderBottomWidth: 1,
     borderBottomColor: '#e2e8f0',
   },
@@ -817,7 +671,7 @@ const styles = StyleSheet.create({
   tabText: {
     fontSize: 15,
     fontWeight: '600',
-    color: '#64748b',
+    color: AppColors.textSecondary,
   },
   activeTabText: {
     color: '#10b981',
@@ -850,7 +704,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   card: {
-    backgroundColor: '#fff',
+    backgroundColor: AppColors.surface,
     borderRadius: 12,
     padding: 16,
     marginBottom: 16,
@@ -868,7 +722,7 @@ const styles = StyleSheet.create({
   cardTitle: {
     fontSize: 18,
     fontWeight: '700',
-    color: '#0f172a',
+    color: AppColors.text,
     marginBottom: 4,
   },
   cardSubtitle: {
@@ -879,12 +733,12 @@ const styles = StyleSheet.create({
   },
   cardDorm: {
     fontSize: 14,
-    color: '#334155',
+    color: AppColors.textSecondary,
     marginBottom: 4,
   },
   boldText: {
     fontWeight: '600',
-    color: '#0f172a',
+    color: AppColors.text,
   },
   cardDetail: {
     fontSize: 12,
@@ -900,7 +754,7 @@ const styles = StyleSheet.create({
   documentLabel: {
     fontSize: 12,
     fontWeight: '600',
-    color: '#64748b',
+    color: AppColors.textSecondary,
     marginTop: 4,
   },
   documentLink: {
@@ -911,7 +765,7 @@ const styles = StyleSheet.create({
   },
   documentText: {
     fontSize: 13,
-    color: '#334155',
+    color: AppColors.textSecondary,
     fontStyle: 'italic',
     marginTop: 2,
   },
@@ -961,7 +815,9 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(15, 23, 42, 0.6)',
   },
   modalContent: {
-    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: AppColors.border,
+    backgroundColor: AppColors.surface,
     borderRadius: 16,
     padding: 24,
     width: '90%',
@@ -978,19 +834,19 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     textAlign: 'center',
     marginBottom: 16,
-    color: '#0f172a',
+    color: AppColors.text,
   },
   formLabel: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#475569',
+    color: AppColors.textSecondary,
     marginTop: 12,
     marginBottom: 6,
   },
   noDormsWarning: {
-    color: '#b45309',
-    backgroundColor: '#fffbeb',
-    borderColor: '#fde68a',
+    color: AppColors.textSecondary,
+    backgroundColor: AppColors.surfaceElevated,
+    borderColor: AppColors.border,
     borderWidth: 1,
     borderRadius: 8,
     padding: 10,
@@ -1000,10 +856,10 @@ const styles = StyleSheet.create({
   },
   dormPickerContainer: {
     borderWidth: 1,
-    borderColor: '#cbd5e1',
+    borderColor: AppColors.inputBorder,
     borderRadius: 8,
     padding: 6,
-    backgroundColor: '#f8fafc',
+    backgroundColor: AppColors.input,
     marginBottom: 12,
   },
   dormOption: {
@@ -1013,10 +869,10 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   dormOptionSelected: {
-    backgroundColor: '#e6fcf5',
+    backgroundColor: AppColors.accentMuted,
   },
   dormOptionText: {
-    color: '#334155',
+    color: AppColors.textSecondary,
     fontSize: 14,
   },
   dormOptionTextSelected: {
@@ -1025,12 +881,12 @@ const styles = StyleSheet.create({
   },
   input: {
     borderWidth: 1,
-    borderColor: '#cbd5e1',
+    borderColor: AppColors.inputBorder,
     borderRadius: 8,
     padding: 12,
     fontSize: 14,
-    color: '#0f172a',
-    backgroundColor: '#f8fafc',
+    color: AppColors.text,
+    backgroundColor: AppColors.input,
     marginBottom: 12,
   },
   modalActions: {
@@ -1047,12 +903,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   cancelModalBtn: {
-    backgroundColor: '#f1f5f9',
+    backgroundColor: AppColors.surfaceElevated,
     borderWidth: 1,
-    borderColor: '#cbd5e1',
+    borderColor: AppColors.inputBorder,
   },
   cancelModalBtnText: {
-    color: '#475569',
+    color: AppColors.textSecondary,
     fontWeight: '600',
     fontSize: 14,
   },
@@ -1065,9 +921,9 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   pickGalleryBtn: {
-    backgroundColor: '#f1f5f9',
+    backgroundColor: AppColors.surfaceElevated,
     borderWidth: 1,
-    borderColor: '#cbd5e1',
+    borderColor: AppColors.inputBorder,
     borderStyle: 'dashed',
     borderRadius: 8,
     padding: 14,
@@ -1082,7 +938,7 @@ const styles = StyleSheet.create({
   imagePickerPreviewBox: {
     marginBottom: 12,
     alignItems: 'center',
-    backgroundColor: '#f8fafc',
+    backgroundColor: AppColors.input,
     borderRadius: 8,
     padding: 8,
     borderWidth: 1,
@@ -1102,7 +958,7 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   changeImageText: {
-    color: '#334155',
+    color: AppColors.textSecondary,
     fontSize: 12,
     fontWeight: '600',
   },

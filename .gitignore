@@ -2,6 +2,7 @@
 
 # dependencies
 node_modules/
+.pnpm-store/
 .expo/
 dist/
 web-build/
@@ -15,6 +16,8 @@ expo-env.d.ts
 *.p12
 *.key
 *.mobileprovision
+*.apk
+*.aab
 
 # Metro
 .metro-health-check*
@@ -26,11 +29,17 @@ yarn-error.*
 
 # macOS
 .DS_Store
+.idea/
+.claude/settings.local.json
 *.pem
 
 # local env files
 .env*.local
 .env
+.env.*
+!.env.example
+supabase/functions/.env
+supabase/functions/.env.local
 
 # typescript
 *.tsbuildinfo

@@ -54,8 +54,9 @@ alter table public.dorms add constraint dorms_tenant_capacity_check
 alter table public.dorms validate constraint dorms_tenant_capacity_check;
 alter table public.dorms drop constraint if exists dorms_contact_phone_check;
 alter table public.dorms add constraint dorms_contact_phone_check
-  check (contact_phone is null or contact_phone ~ '^\\+?[0-9][0-9 -]{6,19}$') not valid;
-alter table public.dorms validate constraint dorms_contact_phone_check;
+  check (contact_phone is null or contact_phone ~ '^\+?[0-9][0-9 -]{6,19}$') not valid;
+-- Keep the constraint NOT VALID so legacy placeholder data remains untouched.
+-- PostgreSQL still enforces it for every new or updated listing.
 
 alter table public.dorm_reviews
   add column if not exists photos text[] not null default '{}';
@@ -312,7 +313,7 @@ begin
     if new.status in ('awaiting_payment', 'rejected', 'approved', 'reserved', 'refund_sent', 'refund_completed') then
       insert into public.notifications(user_id, title, message, type, related_dorm_id, related_request_id)
       values (new.user_id, 'Request updated', dorm_name || ' is now at step: ' || replace(new.status, '_', ' ') || '.', new.status, new.dorm_id, new.request_id);
-    elsif new.status in ('payment_submitted', 'refund_requested') then
+    elsif new.status in ('payment_submitted', 'refund_requested', 'cancelled') then
       insert into public.notifications(user_id, title, message, type, related_dorm_id, related_request_id)
       values (new.owner_id, 'Request action needed', dorm_name || ' is now at step: ' || replace(new.status, '_', ' ') || '.', new.status, new.dorm_id, new.request_id);
     end if;
@@ -559,7 +560,11 @@ as $$
     review.comment,
     review.photos,
     review.created_at,
-    coalesce(nullif(trim(renter.full_name), ''), nullif(trim(renter.username), ''), 'Room Scout renter'),
+    coalesce(
+      case when nullif(trim(renter.username), '') is not null then '@' || trim(renter.username) end,
+      nullif(trim(renter.full_name), ''),
+      'Renter'
+    ),
     renter.avatar_url,
     exists (
       select 1 from public.rentals rental
@@ -610,10 +615,14 @@ on conflict (id) do update set
 
 drop policy if exists "public_read_listing_images" on storage.objects;
 drop policy if exists "users_upload_own_listing_images" on storage.objects;
+drop policy if exists "users_update_own_listing_images" on storage.objects;
 drop policy if exists "users_delete_own_listing_images" on storage.objects;
 create policy "public_read_listing_images" on storage.objects for select to anon, authenticated
   using (bucket_id = 'uploaded_images');
 create policy "users_upload_own_listing_images" on storage.objects for insert to authenticated
+  with check (bucket_id = 'uploaded_images' and (storage.foldername(name))[1] = (select auth.uid())::text);
+create policy "users_update_own_listing_images" on storage.objects for update to authenticated
+  using (bucket_id = 'uploaded_images' and (storage.foldername(name))[1] = (select auth.uid())::text)
   with check (bucket_id = 'uploaded_images' and (storage.foldername(name))[1] = (select auth.uid())::text);
 create policy "users_delete_own_listing_images" on storage.objects for delete to authenticated
   using (bucket_id = 'uploaded_images' and (storage.foldername(name))[1] = (select auth.uid())::text);
@@ -635,11 +644,12 @@ create policy "request_participants_read_private_documents" on storage.objects f
   using (
     bucket_id = 'private_documents' and exists (
       select 1 from public.rental_requests request
-      where request.owner_id = (select auth.uid())
+      where (request.owner_id = (select auth.uid()) or request.user_id = (select auth.uid()))
         and (
           request.renter_gov_id_url = storage.objects.name
           or request.payment_proof_url = storage.objects.name
           or request.owner_payment_qr_url = storage.objects.name
+          or request.contract_url = storage.objects.name
           or request.renter_refund_qr_url = storage.objects.name
           or request.refund_proof_url = storage.objects.name
         )
@@ -666,3 +676,11 @@ create index if not exists rental_requests_user_status_idx on public.rental_requ
 create index if not exists notifications_user_read_idx on public.notifications(user_id, read, created_at desc);
 
 commit;
+-- Older permissive policies are OR-ed with newer policies and must be removed.
+drop policy if exists "Public Upload to uploaded_images" on storage.objects;
+drop policy if exists "Public Select from uploaded_images" on storage.objects;
+drop policy if exists "Public Update uploaded_images" on storage.objects;
+drop policy if exists "Public Read Uploaded Images" on storage.objects;
+drop policy if exists "Authenticated Upload Uploaded Images" on storage.objects;
+drop policy if exists "Owner Read Private Documents" on storage.objects;
+drop policy if exists "Authenticated Upload Private Documents" on storage.objects;

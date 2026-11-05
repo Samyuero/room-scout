@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import { KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -8,6 +8,7 @@ import { useDiscovery } from '@/context/discovery-context';
 import { findDormsFromPrompt } from '@/lib/dorm-assistant';
 import { formatPeso } from '@/lib/dorm-discovery';
 import type { Dorm } from '@/types/dorm';
+import { askGeminiAssistant, AssistantRateLimitError } from '@/lib/gemini-assistant';
 
 interface Message {
   id: string;
@@ -25,32 +26,54 @@ const QUICK_PROMPTS = [
 export default function Chat() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { dorms, filters, location } = useDiscovery();
+  const { dorms, filters, location, hasPreferences } = useDiscovery();
   const [input, setInput] = useState('');
+  const [sending, setSending] = useState(false);
   const messageSequence = useRef(0);
   const [messages, setMessages] = useState<Message[]>([
     {
       id: 'welcome',
       role: 'assistant',
-      text: 'Tell me your budget, preferred area or radius, and must-have features. I use public listings only—do not send IDs, payment details, passwords, or OTPs here.',
+      text: 'Hi! I’m SNAP, your RoomScout dorm assistant. How may I help you find a dorm today?',
     },
   ]);
 
-  const canSend = input.trim().length > 0;
+  const canSend = input.trim().length > 0 && !sending;
   const visiblePrompts = useMemo(() => messages.length === 1, [messages.length]);
 
-  function send(text = input) {
+  async function send(text = input) {
     const clean = text.trim().slice(0, 500);
-    if (!clean) return;
-    const result = findDormsFromPrompt(clean, dorms, filters, location);
+    if (!clean || sending) return;
+    const localResult = findDormsFromPrompt(clean, dorms, filters, location);
     messageSequence.current += 1;
     const messageId = messageSequence.current;
-    setMessages((current) => [
-      ...current,
-      { id: `user-${messageId}`, role: 'user', text: clean },
-      { id: `assistant-${messageId}`, role: 'assistant', text: result.text, matches: result.matches },
-    ]);
+    setMessages((current) => [...current, { id: `user-${messageId}`, role: 'user', text: clean }]);
     setInput('');
+    setSending(true);
+    try {
+      const response = await askGeminiAssistant({ action: 'chat', message: clean });
+      const matches = response.dormIds
+        .map((id) => dorms.find((dorm) => dorm.dorm_id === id))
+        .filter(Boolean) as Dorm[];
+      setMessages((current) => [...current, {
+        id: `assistant-${messageId}`,
+        role: 'assistant',
+        text: response.text,
+        matches: matches.length ? matches : localResult.matches,
+      }]);
+    } catch (caught) {
+      const fallbackIntro = caught instanceof AssistantRateLimitError
+        ? 'The online assistant is taking a short break to protect the project’s free quota, so I used RoomScout’s built-in matcher instead.'
+        : 'I could not reach the online assistant, so I used RoomScout’s built-in matcher instead.';
+      setMessages((current) => [...current, {
+        id: `assistant-${messageId}`,
+        role: 'assistant',
+        text: `${fallbackIntro} ${localResult.text}`,
+        matches: localResult.matches,
+      }]);
+    } finally {
+      setSending(false);
+    }
   }
 
   return (
@@ -60,11 +83,6 @@ export default function Chat() {
         contentContainerStyle={[styles.messages, { paddingBottom: 18 }]}
         keyboardShouldPersistTaps="handled"
       >
-        <View style={styles.privacyBanner}>
-          <Ionicons name="shield-checkmark-outline" size={18} color={AppColors.success} />
-          <Text style={styles.privacyText}>Public listing assistant · no private renter data</Text>
-        </View>
-
         {messages.map((message) => (
           <View key={message.id} style={[styles.message, message.role === 'user' ? styles.userMessage : styles.assistantMessage]}>
             <Text selectable style={[styles.messageText, message.role === 'user' && styles.userText]}>{message.text}</Text>
@@ -72,9 +90,9 @@ export default function Chat() {
               <Pressable key={dorm.dorm_id} onPress={() => router.push(`/(tabs)/${dorm.dorm_id}` as never)} style={styles.matchCard}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.matchName} numberOfLines={1}>{dorm.name}</Text>
-                  <Text style={styles.matchMeta}>{formatPeso(dorm.price)} · ★ {dorm.rating_average || 'New'}{dorm.distance_km !== null ? ` · ${dorm.distance_km} km` : ''}</Text>
+                  <Text style={styles.matchMeta}>{formatPeso(dorm.price)} · {dorm.rating_count ? `★ ${dorm.rating_average}` : 'No reviews'}{dorm.distance_km !== null ? ` · ${dorm.distance_km} km` : ''}</Text>
                 </View>
-                <View style={styles.matchBadge}><Text style={styles.matchScore}>{dorm.ranking_score}</Text></View>
+                {hasPreferences && <View style={styles.matchBadge}><Text style={styles.matchScore}>{dorm.ranking_score}</Text></View>}
               </Pressable>
             ))}
           </View>
@@ -91,6 +109,7 @@ export default function Chat() {
             ))}
           </View>
         )}
+        {sending && <View style={[styles.message, styles.assistantMessage, styles.thinking]}><ActivityIndicator color={AppColors.accent} /><Text style={styles.messageText}>SNAP is checking current listings…</Text></View>}
       </ScrollView>
 
       <View style={[styles.composer, { paddingBottom: Math.max(insets.bottom, 10) }]}>
@@ -100,10 +119,10 @@ export default function Chat() {
           value={input}
           onChangeText={setInput}
           placeholder="Example: under ₱6,000, within 3 km, pet friendly"
-          placeholderTextColor={AppColors.textMuted}
+          placeholderTextColor={AppColors.placeholder}
           style={styles.input}
         />
-        <Pressable disabled={!canSend} onPress={() => send()} style={[styles.sendButton, !canSend && styles.sendDisabled]}>
+        <Pressable disabled={!canSend} onPress={() => void send()} style={[styles.sendButton, !canSend && styles.sendDisabled]}>
           <Ionicons name="send" size={18} color={AppColors.white} />
         </Pressable>
       </View>
@@ -114,8 +133,6 @@ export default function Chat() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: AppColors.background },
   messages: { padding: 16, gap: 12 },
-  privacyBanner: { flexDirection: 'row', alignItems: 'center', gap: 7, padding: 10, borderRadius: BorderRadius.md, backgroundColor: AppColors.successBg, borderWidth: 1, borderColor: AppColors.success },
-  privacyText: { flex: 1, color: AppColors.success, fontSize: 11, fontWeight: '700' },
   message: { maxWidth: '92%', padding: 13, gap: 10, borderRadius: BorderRadius.lg, borderCurve: 'continuous' },
   assistantMessage: { alignSelf: 'flex-start', backgroundColor: AppColors.surface, borderWidth: 1, borderColor: AppColors.borderSubtle },
   userMessage: { alignSelf: 'flex-end', backgroundColor: AppColors.accent },
@@ -134,4 +151,5 @@ const styles = StyleSheet.create({
   input: { flex: 1, maxHeight: 110, minHeight: 46, paddingHorizontal: 12, paddingVertical: 11, borderRadius: BorderRadius.md, color: AppColors.text, backgroundColor: AppColors.input, borderWidth: 1, borderColor: AppColors.inputBorder, fontSize: 13 },
   sendButton: { width: 46, height: 46, alignItems: 'center', justifyContent: 'center', borderRadius: 23, backgroundColor: AppColors.accent },
   sendDisabled: { opacity: 0.4 },
+  thinking: { flexDirection: 'row', alignItems: 'center' },
 });

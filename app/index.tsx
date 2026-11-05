@@ -1,58 +1,51 @@
 import { Redirect } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, View } from 'react-native';
+import { Pressable, Text, View } from 'react-native';
+import { AppLoadingScreen } from '@/components/app-loading-screen';
 import { useAuth } from '../src/hooks/useAuth';
-import { supabase } from '../src/lib/supabase';
+import { getAccountRegistration } from '@/lib/account-profile';
 import { AppColors } from '@/constants/theme';
 
 export default function Index() {
   const { user, loading: authLoading } = useAuth();
   const [checkingProfile, setCheckingProfile] = useState(true);
-  const [hasUsername, setHasUsername] = useState(false);
+  const [registrationComplete, setRegistrationComplete] = useState(false);
+  const [profileError, setProfileError] = useState(false);
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
+    let active = true;
     const checkProfile = async () => {
+      setCheckingProfile(true);
+      setProfileError(false);
       if (!user) {
+        setRegistrationComplete(false);
         setCheckingProfile(false);
         return;
       }
       try {
-        const [renter, owner, admin] = await Promise.all([
-          supabase.from('renters').select('username').eq('renter_id', user.id).maybeSingle(),
-          supabase.from('owners').select('username').eq('owner_id', user.id).maybeSingle(),
-          supabase.from('admins').select('username').eq('admin_id', user.id).maybeSingle()
-        ]);
-
-        const username = renter.data?.username || owner.data?.username || admin.data?.username;
-
-        if (username) {
-          setHasUsername(true);
-        } else {
-          setHasUsername(false);
-        }
-      } catch (err) {
-        console.error('Error checking profile username:', err);
-        setHasUsername(false);
+        const profile = await getAccountRegistration(user.id);
+        if (active) setRegistrationComplete(profile.completed);
+      } catch {
+        if (active) setProfileError(true);
       } finally {
-        setCheckingProfile(false);
+        if (active) setCheckingProfile(false);
       }
     };
 
     if (!authLoading) {
       checkProfile();
     }
-  }, [user, authLoading]);
+    return () => { active = false; };
+  }, [user, authLoading, retry]);
 
   if (authLoading || checkingProfile) {
-    return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#000000' }}>
-        <ActivityIndicator size="large" color={AppColors.accent} />
-      </View>
-    );
+    return <AppLoadingScreen />;
   }
 
   if (user) {
-    if (!hasUsername) {
+    if (profileError) return <View style={{ flex: 1, backgroundColor: AppColors.background, padding: 24, justifyContent: 'center', gap: 16 }}><Text style={{ color: AppColors.text }}>We couldn’t load your profile. Check your connection and try again.</Text><Pressable onPress={() => setRetry((value) => value + 1)}><Text style={{ color: AppColors.accent }}>Retry</Text></Pressable></View>;
+    if (!registrationComplete) {
       return <Redirect href={"/(auth)/setup-username" as any} />;
     }
     return <Redirect href={"/(tabs)/home" as any} />;

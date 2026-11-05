@@ -4,6 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { ColorValue } from 'react-native';
 import { AppColors } from '@/constants/theme';
 import { DormAssistantFab } from '@/components/dorm-assistant-fab';
+import { useNotifications } from '@/context/notification-context';
 
 type TabIconName = keyof typeof Ionicons.glyphMap;
 
@@ -13,6 +14,7 @@ function TabIcon({ name, color, size }: { name: TabIconName; color: ColorValue; 
 
 export default function TabsLayout() {
   const insets = useSafeAreaInsets();
+  const { profileBadgeCount } = useNotifications();
   const bottomInset = Math.max(insets.bottom, 12);
   const tabBarHeight = 58 + bottomInset;
 
@@ -80,6 +82,8 @@ export default function TabsLayout() {
         name="profile"
         options={{
           title: 'Profile',
+          tabBarBadge: profileBadgeCount > 0 ? profileBadgeCount : undefined,
+          tabBarBadgeStyle: { backgroundColor: AppColors.error, color: AppColors.white, fontSize: 9 },
           tabBarIcon: ({ color, size }) => <TabIcon name="person-outline" color={color} size={size} />,
         }}
       />

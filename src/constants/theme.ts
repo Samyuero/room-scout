@@ -12,6 +12,7 @@ export const AppColors = {
   text: '#FFFFFF',
   textSecondary: '#94A3B8',
   textMuted: '#64748B',
+  placeholder: '#94A3B8',
   accent: '#3B82F6',
   accentMuted: '#2563EB',
   success: '#34D399',

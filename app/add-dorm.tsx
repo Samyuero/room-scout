@@ -1,24 +1,37 @@
+import { showError } from '@/components/error-toast';
 import { useState, useCallback, useEffect } from 'react';
 import { View, Text, TextInput, Button, Switch, ActivityIndicator, StyleSheet, ScrollView, Alert, Pressable, Image } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { supabase } from '@/lib/supabase';
+import { ErrorNotice } from '@/components/error-notice';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useAuth } from '@/hooks/useAuth';
 import { useDiscovery } from '@/context/discovery-context';
 import { LeafletMapView } from '@/components/leaflet-map-view';
 import { isPhilippinesCoordinates, UCLM_COORDINATES } from '@/constants/map';
 import { AppColors, BorderRadius } from '@/constants/theme';
-import { uploadImage, uploadPrivateImage } from '@/utils/imageUpload';
+import { getSafeImageExtension, uploadImage, uploadPrivateImage } from '@/utils/imageUpload';
 import type { UserCoordinates } from '@/types/dorm';
 import { getErrorMessage } from '@/lib/logger';
 
 
 export default function AddDormScreen() {
   const router = useRouter();
+  const { dormId } = useLocalSearchParams<{ dormId?: string }>();
+  const isEditing = Boolean(dormId);
+  const [savedDormId, setSavedDormId] = useState<string | null>(null);
+  const [existingImages, setExistingImages] = useState<string[]>([]);
+  const [existingProof, setExistingProof] = useState('');
+  const [occupiedTenants, setOccupiedTenants] = useState(0);
+  const [requestLgu, setRequestLgu] = useState(false);
+  const [lguProof, setLguProof] = useState('');
+  const [lguCertified, setLguCertified] = useState(false);
+  const [lguStatus, setLguStatus] = useState('');
+  const { refresh } = useDiscovery();
   const { user } = useAuth();
   const { rankedDorms } = useDiscovery();
   
@@ -61,6 +74,23 @@ export default function AddDormScreen() {
   });
 
   useEffect(() => {
+    if (!dormId || !user?.id) return;
+    void (async () => {
+      const { data, error: loadError } = await supabase.from('dorms').select('*').eq('dorm_id', dormId).eq('owner_id', user.id).single();
+      if (loadError || !data) { setError('Your listing could not be loaded.'); return; }
+      setExistingImages(data.images || []);
+      setExistingProof(data.ownership_proof_url || '');
+      setOccupiedTenants(Number(data.occupied_tenants || 0));
+      setLguCertified(Boolean(data.lgu_certified));
+      setMapCenter({ latitude: data.latitude, longitude: data.longitude });
+      setForm((current) => ({ ...current, ...data, price: String(data.price), latitude: String(data.latitude), longitude: String(data.longitude), reservation_fee: String(data.reservation_fee || 0), max_tenants: String(data.max_tenants || 1), contact_phone: data.contact_phone || current.contact_phone || '', contact_email: data.contact_email || '' }));
+      const { data: certification } = await supabase.from('lgu_certification_requests').select('status').eq('dorm_id', dormId).maybeSingle();
+      setLguStatus(certification?.status || '');
+    })();
+  }, [dormId, user?.id]);
+
+  useEffect(() => {
+    if (isEditing) return;
     const getUserLocation = async () => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
@@ -96,7 +126,7 @@ export default function AddDormScreen() {
       }
     };
     getUserLocation();
-  }, []);
+  }, [isEditing]);
 
   useEffect(() => {
     const checkUserRole = async () => {
@@ -108,7 +138,7 @@ export default function AddDormScreen() {
         // Check owners table first, then admins
         const { data: ownerData } = await supabase
           .from('owners')
-          .select('owner_id, full_name, username')
+          .select('owner_id, full_name, username, phone_number')
           .eq('owner_id', user.id)
           .maybeSingle();
 
@@ -125,12 +155,12 @@ export default function AddDormScreen() {
             ...prev,
             owner_display_name: ownerData.full_name || ownerData.username || user.email || 'Verified Owner',
             contact_email: user.email || '',
-            contact_phone: prev.contact_phone || '09170000000',
+            contact_phone: prev.contact_phone || ownerData.phone_number || '',
           }));
         } else {
           const { data: adminData } = await supabase
             .from('admins')
-            .select('admin_id, full_name, username')
+            .select('admin_id, full_name, username, phone_number')
             .eq('admin_id', user.id)
             .maybeSingle();
           setUserRole(adminData ? 'admin' : 'user');
@@ -139,7 +169,7 @@ export default function AddDormScreen() {
               ...prev,
               owner_display_name: adminData.full_name || adminData.username || user.email || 'Administrator',
               contact_email: user.email || '',
-              contact_phone: prev.contact_phone || '09170000000',
+              contact_phone: prev.contact_phone || adminData.phone_number || '',
             }));
           }
         }
@@ -180,7 +210,7 @@ export default function AddDormScreen() {
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Permission Denied', 'We need access to your gallery to upload photos.');
+        showError('Permission Denied', 'We need access to your gallery to upload photos.');
         return;
       }
 
@@ -214,7 +244,7 @@ export default function AddDormScreen() {
       }
     } catch (err) {
       console.error('Error picking images:', err);
-      Alert.alert('Error', 'Failed to pick images');
+      showError('Error', 'Failed to pick images');
     }
   };
 
@@ -222,7 +252,7 @@ export default function AddDormScreen() {
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Permission Denied', 'Gallery access is required to select ownership proof.');
+        showError('Permission Denied', 'Gallery access is required to select ownership proof.');
         return;
       }
 
@@ -234,7 +264,7 @@ export default function AddDormScreen() {
       if (!result.canceled) setOwnershipProofUri(result.assets[0].uri);
     } catch (err) {
       console.error('Error selecting ownership proof:', err);
-      Alert.alert('Selection failed', 'The ownership proof image could not be selected.');
+      showError('Selection failed', 'The ownership proof image could not be selected.');
     }
   };
 
@@ -257,9 +287,14 @@ export default function AddDormScreen() {
       if (!form.description.trim()) throw new Error('Please enter a description for the dormitory.');
       if (!form.address.trim()) throw new Error('Please enter an address.');
       if (!form.price.trim()) throw new Error('Please enter the monthly price.');
-      if (!ownershipProofUri) throw new Error('Please upload proof of ownership.');
-      if (selectedImages.length === 0) throw new Error('Please select at least 1 photo of the dormitory from your gallery.');
+      if (form.contact_phone.trim() && !/^\+?[0-9][0-9 ()-]{6,19}$/.test(form.contact_phone.trim())) throw new Error('Enter a valid phone number using 7 to 20 digits.');
+      if (!form.contact_email.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.contact_email.trim())) throw new Error('Enter a valid owner contact email.');
+      if (!ownershipProofUri && !existingProof) throw new Error('Please upload proof of ownership.');
+      if (selectedImages.length + existingImages.length === 0) throw new Error('Please select at least 1 photo of the dormitory from your gallery.');
 
+      if (requestLgu && !lguProof) throw new Error('Upload LGU certification proof before requesting certification.');
+      if (Number(form.max_tenants) < occupiedTenants) throw new Error('Capacity cannot be lower than the current number of tenants.');
+      if (existingImages.length + selectedImages.length > 10) throw new Error('Keep up to 10 listing photos.');
       // Parse numeric fields
       const price = parseFloat(form.price);
       const latitude = parseFloat(form.latitude);
@@ -272,10 +307,10 @@ export default function AddDormScreen() {
         throw new Error('You must be signed in to add a dorm');
       }
 
-      const uploadedUrls: string[] = [];
+      const uploadedUrls: string[] = [...existingImages];
       const uploadTimestamp = Date.now();
       for (const [index, image] of selectedImages.entries()) {
-        const ext = image.fileName?.split('.').pop()?.toLowerCase() || image.uri.split('.').pop()?.toLowerCase() || 'jpg';
+        const ext = getSafeImageExtension(image.fileName || image.uri, image.mimeType || undefined);
         const fileName = `${user.id}/listings/${uploadTimestamp}-${index}.${ext}`;
         try {
           const publicUrl = await uploadImage(fileName, image.uri, image.mimeType || undefined);
@@ -286,13 +321,13 @@ export default function AddDormScreen() {
         }
       }
 
-      const proofExt = ownershipProofUri.split('.').pop() || 'jpg';
-      let ownershipProofUrl = '';
+      const proofExt = getSafeImageExtension(ownershipProofUri);
+      let ownershipProofUrl = existingProof;
       try {
-        ownershipProofUrl = await uploadPrivateImage(`${user.id}/ownership/${Date.now()}.${proofExt}`, ownershipProofUri);
+        if (ownershipProofUri) ownershipProofUrl = await uploadPrivateImage(`${user.id}/ownership/${Date.now()}.${proofExt}`, ownershipProofUri);
       } catch (proofErr) {
-        console.warn('Ownership proof upload warning:', proofErr);
-        ownershipProofUrl = '';
+        console.warn('Ownership proof upload failed:', proofErr);
+        throw new Error(`Ownership proof could not upload securely. ${getErrorMessage(proofErr)}`);
       }
 
       const fullPayload: Record<string, any> = {
@@ -313,7 +348,7 @@ export default function AddDormScreen() {
         furnished: form.furnished,
         max_tenants: Math.max(1, Math.min(500, Number(form.max_tenants) || 1)),
         occupied_tenants: 0,
-        contact_phone: (form.contact_phone || '09170000000').trim(),
+        contact_phone: form.contact_phone.trim() || null,
         contact_email: (form.contact_email || user.email || '').trim(),
         owner_display_name: (form.owner_display_name || 'Verified Owner').trim(),
         pet_friendly: form.pet_friendly,
@@ -324,41 +359,35 @@ export default function AddDormScreen() {
         owner_id: user.id,
       };
 
-      let { error: insertError } = await supabase.from('dorms').insert(fullPayload);
-
-      // Failsafe: If DB table does not have extended columns (e.g. approval_status) yet, fallback to core payload
-      if (insertError && (insertError.message?.includes('approval_status') || insertError.message?.includes('schema cache') || insertError.message?.includes('column'))) {
-        console.warn('Retrying dorm insertion with core columns fallback:', insertError.message);
-        const corePayload = {
-          name: form.name.trim(),
-          description: form.description.trim(),
-          address: form.address.trim(),
-          price,
-          latitude,
-          longitude,
-          utilities: form.utilities,
-          amenities: form.amenities,
-          available: form.available,
-          images: uploadedUrls,
-          owner_id: user.id,
-        };
-        const fallbackRes = await supabase.from('dorms').insert(corePayload);
-        insertError = fallbackRes.error;
+      const listingId = dormId || savedDormId;
+      if (listingId) {
+        delete fullPayload.occupied_tenants;
+        delete fullPayload.owner_id;
+        delete fullPayload.approval_status;
       }
-
-      if (insertError) throw insertError;
-
+      const result = listingId
+        ? await supabase.from('dorms').update(fullPayload).eq('dorm_id', listingId).eq('owner_id', user.id).select('dorm_id').single()
+        : await supabase.from('dorms').insert(fullPayload).select('dorm_id').single();
+      if (result.error) throw result.error;
+      setSavedDormId(result.data.dorm_id);
+      if (requestLgu) {
+        const proofPath = await uploadPrivateImage(user.id + '/lgu-certification/' + Date.now() + '.' + getSafeImageExtension(lguProof), lguProof);
+        const { error: certificationError } = await supabase.rpc('submit_lgu_certification', { p_dorm_id: result.data.dorm_id, p_proof_path: proofPath });
+        if (certificationError) throw new Error('Your listing was saved, but LGU proof could not be submitted. ' + certificationError.message);
+      }
+      await refresh();
+      Alert.alert(isEditing ? 'Listing saved' : 'Listing submitted', requestLgu ? 'Your LGU proof is waiting for administrator review.' : isEditing ? 'Your changes are saved.' : 'An administrator will review your ownership proof.');
       // Navigate back to home
       router.push('/(tabs)/home' as any);
 
     } catch (err: any) {
       const msg = err?.message || err?.error_description || getErrorMessage(err);
-      setError(msg);
+      showError('Listing could not be saved', msg);
     } finally {
       setLoading(false);
       setUploadingImages(false);
     }
-  }, [form, ownershipProofUri, router, selectedImages, userRole, user]);
+  }, [form, ownershipProofUri, router, selectedImages, userRole, user, existingImages, existingProof, requestLgu, lguProof, occupiedTenants, isEditing, dormId, savedDormId, refresh]);
 
 
   if (checkingRole) {
@@ -388,19 +417,15 @@ export default function AddDormScreen() {
 
   return (
     <View style={styles.container}>
-      {error && (
-        <View style={styles.error}>
-          <ThemedText type="small" themeColor="text">Error: {error}</ThemedText>
-        </View>
-      )}
+      <ErrorNotice message={error} />
       <ScrollView contentContainerStyle={styles.formContainer}>
         <ThemedText type="subtitle" themeColor="text" style={styles.sectionTitle}>
-          Add New Dormitory
+          {isEditing ? 'Edit Dormitory' : 'Add New Dormitory'}
         </ThemedText>
 
         <ThemedView style={styles.inputContainer}>
           <ThemedText type="smallBold" themeColor="text">Name:</ThemedText>
-          <TextInput
+          <TextInput placeholderTextColor={AppColors.placeholder}
             style={styles.input}
             placeholder="Enter dormitory name"
             value={form.name}
@@ -410,7 +435,7 @@ export default function AddDormScreen() {
 
         <ThemedView style={styles.inputContainer}>
           <ThemedText type="smallBold" themeColor="text">Description:</ThemedText>
-          <TextInput
+          <TextInput placeholderTextColor={AppColors.placeholder}
             style={[styles.input, { minHeight: 80 }]}
             placeholder="Enter description"
             value={form.description}
@@ -421,7 +446,7 @@ export default function AddDormScreen() {
 
         <ThemedView style={styles.inputContainer}>
           <ThemedText type="smallBold" themeColor="text">Address:</ThemedText>
-          <TextInput
+          <TextInput placeholderTextColor={AppColors.placeholder}
             style={styles.input}
             placeholder="Enter address"
             value={form.address}
@@ -431,7 +456,7 @@ export default function AddDormScreen() {
 
         <ThemedView style={styles.inputContainer}>
           <ThemedText type="smallBold" themeColor="text">Price per month:</ThemedText>
-          <TextInput
+          <TextInput placeholderTextColor={AppColors.placeholder}
             style={styles.input}
             placeholder="Enter price"
             value={form.price}
@@ -442,7 +467,6 @@ export default function AddDormScreen() {
 
         <ThemedView style={styles.inputContainer}>
           <ThemedText type="smallBold" themeColor="text">Location on Map:</ThemedText>
-          <Text style={styles.mapHint}>Tap the Leaflet map or drag the pin to set the dormitory location.</Text>
           <Text style={styles.coordsText}>
             Selected Coords: {parseFloat(form.latitude).toFixed(5)}, {parseFloat(form.longitude).toFixed(5)}
           </Text>
@@ -521,7 +545,7 @@ export default function AddDormScreen() {
 
         <ThemedView style={styles.inputContainer}>
           <ThemedText type="smallBold" themeColor="text">Reservation fee:</ThemedText>
-          <TextInput
+          <TextInput placeholderTextColor={AppColors.placeholder}
             style={styles.input}
             placeholder="Amount in PHP"
             value={form.reservation_fee}
@@ -537,12 +561,12 @@ export default function AddDormScreen() {
 
         <ThemedView style={styles.inputContainer}>
           <ThemedText type="smallBold" themeColor="text">Maximum tenants:</ThemedText>
-          <TextInput style={styles.input} keyboardType="number-pad" value={form.max_tenants} onChangeText={(text) => handleChange('max_tenants', text.replace(/\D/g, '').slice(0, 3))} />
+          <TextInput placeholderTextColor={AppColors.placeholder} style={styles.input} keyboardType="number-pad" value={form.max_tenants} onChangeText={(text) => handleChange('max_tenants', text.replace(/\D/g, '').slice(0, 3))} />
         </ThemedView>
 
         <ThemedView style={styles.inputContainer}>
-          <ThemedText type="smallBold" themeColor="text">Contact phone (required):</ThemedText>
-          <TextInput style={styles.input} keyboardType="phone-pad" maxLength={20} placeholder="e.g. 0917 123 4567" value={form.contact_phone} onChangeText={(text) => handleChange('contact_phone', text)} />
+          <ThemedText type="smallBold" themeColor="text">Contact phone:</ThemedText>
+          <TextInput placeholderTextColor={AppColors.placeholder} style={styles.input} keyboardType="phone-pad" maxLength={21} placeholder="e.g. 0917 123 4567" value={form.contact_phone} onChangeText={(text) => handleChange('contact_phone', text)} />
         </ThemedView>
 
         <ThemedView style={styles.inputContainer}>
@@ -553,10 +577,10 @@ export default function AddDormScreen() {
         </ThemedView>
 
         <ThemedView style={styles.inputContainer}>
-          <ThemedText type="smallBold" themeColor="text">Proof of ownership (required every submission):</ThemedText>
+          <ThemedText type="smallBold" themeColor="text">{isEditing ? 'Proof of ownership' : 'Proof of ownership (required):'}</ThemedText>
           <Pressable style={styles.imageButton} onPress={pickOwnershipProof}><Text style={styles.imageButtonText}>{ownershipProofUri ? 'Change selected proof' : 'Choose proof image'}</Text></Pressable>
           {ownershipProofUri ? <Image source={{ uri: ownershipProofUri }} style={styles.proofPreview} /> : null}
-          <Text style={styles.mapHint}>The listing stays pending until an admin reviews this proof.</Text>
+          <Text style={styles.mapHint}>{isEditing ? 'Your existing ownership proof is retained unless you replace it.' : 'The listing stays pending until an admin reviews this proof.'}</Text>
         </ThemedView>
 
         <ThemedView style={styles.inputContainer}>
@@ -575,6 +599,7 @@ export default function AddDormScreen() {
             <Text style={styles.imageButtonText}>Select up to 10 photos from gallery</Text>
           </Pressable>
 
+          {existingImages.length > 0 && <ScrollView horizontal showsHorizontalScrollIndicator={false}>{existingImages.map((uri) => <View key={uri} style={styles.previewItem}><Image source={{ uri }} style={styles.previewImage} /><Pressable style={styles.removeBadge} onPress={() => setExistingImages((images) => images.filter((image) => image !== uri))}><Text style={styles.removeText}>X</Text></Pressable></View>)}</ScrollView>}
           {selectedImages.length > 0 && (
             <ScrollView horizontal style={styles.previewContainer} showsHorizontalScrollIndicator={false}>
               {selectedImages.map((image, index) => (
@@ -589,8 +614,17 @@ export default function AddDormScreen() {
           )}
         </ThemedView>
 
+        <ThemedView style={styles.inputContainer}>
+          <ThemedText type="smallBold" themeColor="text">LGU certification</ThemedText>
+          {lguCertified ? <Text style={{ color: AppColors.success }}>LGU certified</Text> : <>
+            <Text style={styles.mapHint}>{lguStatus === 'pending' ? 'Your certification proof is under review.' : lguStatus === 'rejected' ? 'The previous proof was declined. You can upload a corrected certificate.' : 'Submit a valid LGU certificate for administrator review.'}</Text>
+            <Pressable onPress={() => setRequestLgu((value) => !value)} style={styles.choice}><Text style={styles.choiceText}>{requestLgu ? '✓ Request LGU certification' : 'Request LGU certification'}</Text></Pressable>
+            {requestLgu && <Pressable style={styles.imageButton} onPress={async () => { const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8 }); if (!result.canceled) setLguProof(result.assets[0].uri); }}><Text style={styles.imageButtonText}>{lguProof ? 'Change certificate image' : 'Choose LGU certificate'}</Text></Pressable>}
+            {requestLgu && lguProof ? <Image source={{ uri: lguProof }} style={styles.proofPreview} /> : null}
+          </>}
+        </ThemedView>
         <Button
-          title={loading ? 'Uploading & Listing...' : 'Submit Listing'}
+          title={loading ? 'Saving...' : isEditing ? 'Save Changes' : 'Submit Listing'}
           onPress={handleSubmit}
           disabled={loading || uploadingImages}
           color="#007aff"

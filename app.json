@@ -12,7 +12,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#000000",
+        "backgroundColor": "#F8FAFC",
         "foregroundImage": "./assets/logo.png"
       },
       "package": "com.snap.rooms",
@@ -29,12 +29,26 @@
     "plugins": [
       "expo-router",
       [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow Room Scout to show your current position and nearby dormitories."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Room Scout to select dorm, profile, review, and verification photos.",
+          "cameraPermission": "Allow Room Scout to take dorm, profile, review, and verification photos.",
+          "microphonePermission": false
+        }
+      ],
+      [
         "expo-splash-screen",
         {
-          "backgroundColor": "#000000",
+          "backgroundColor": "#0A0F1A",
           "android": {
             "image": "./assets/logo.png",
-            "imageWidth": 150
+            "imageWidth": 260
           }
         }
       ],

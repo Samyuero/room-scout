@@ -1,29 +1,51 @@
-import { useState, useEffect } from 'react';
+import { ErrorToast, showError } from '@/components/error-toast';
+import { useState, useEffect, useCallback } from 'react';
 import { View, Text, Image, StyleSheet, ActivityIndicator, TextInput, Alert, Pressable, ScrollView, Modal } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import * as Location from 'expo-location';
 import { supabase } from '../../src/lib/supabase';
 import { useAuth } from '../../src/hooks/useAuth';
-import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { AppColors, BorderRadius } from '@/constants/theme';
-import { uploadImage } from '@/utils/imageUpload';
+import { getSafeImageExtension, uploadImage } from '@/utils/imageUpload';
 import { LeafletMapView } from '@/components/leaflet-map-view';
 import { UCLM_COORDINATES } from '@/constants/map';
+import { useDiscovery } from '@/context/discovery-context';
+import { useNotifications } from '@/context/notification-context';
 
 export default function Profile() {
   const { user } = useAuth();
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { refreshPreferences } = useDiscovery();
   const [profile, setProfile] = useState<any>(null);
+  const [dormCount, setDormCount] = useState(0);
+  const [listingsOpen, setListingsOpen] = useState(false);
   const [dorms, setDorms] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [editMode, setEditMode] = useState(false);
   const [editedProfile, setEditedProfile] = useState<any>({});
-  const [unreadCount, setUnreadCount] = useState(0);
+  const { unreadCount, requestUnreadCount, tenantUnreadCount } = useNotifications();
+  const [showRequestsIcon, setShowRequestsIcon] = useState(true);
+  useEffect(() => {
+    if (requestUnreadCount > 0) { setShowRequestsIcon(true); return; }
+    const timer = setInterval(() => setShowRequestsIcon((current) => !current), 5000);
+    return () => clearInterval(timer);
+  }, [requestUnreadCount]);
   const [avatarUri, setAvatarUri] = useState('');
   const [saving, setSaving] = useState(false);
+
+  useFocusEffect(useCallback(() => {
+    if (!user?.id) return;
+    const reload = async () => {
+      const { data, count, error } = await supabase.from('dorms').select('*', { count: 'exact' }).eq('owner_id', user.id).order('created_at', { ascending: false });
+      if (!error) { setDorms(data || []); setDormCount(count || 0); }
+    };
+    void reload();
+    const channel = supabase.channel('profile-dorm-list-' + user.id + '-' + Date.now()).on('postgres_changes', { event: '*', schema: 'public', table: 'dorms', filter: 'owner_id=eq.' + user.id }, () => void reload()).subscribe();
+    return () => { void supabase.removeChannel(channel); };
+  }, [user]));
 
   // Dedicated preferences modal state
   const [prefModalVisible, setPrefModalVisible] = useState(false);
@@ -40,12 +62,13 @@ export default function Profile() {
     budget_min: '',
     budget_max: '',
     preferred_location: '',
-    radius_km: '10',
+    radius_km: '5',
     parking: '',
     pet_friendly: false,
     latitude: Number(UCLM_COORDINATES.latitude),
     longitude: Number(UCLM_COORDINATES.longitude),
   });
+  const [extraPreferences, setExtraPreferences] = useState<{ amenities: string[]; utilities: string[]; house_rules: string[]; gender_policy: string; curfew: string; room_type: string; lgu_certified: boolean; furnished: boolean }>({ amenities: [], utilities: [], house_rules: [], gender_policy: '', curfew: '', room_type: '', lgu_certified: false, furnished: false });
   const [showMapPicker, setShowMapPicker] = useState(false);
   const [savingPref, setSavingPref] = useState(false);
 
@@ -84,9 +107,9 @@ export default function Profile() {
         }
 
         // Get user's dorms (only for owners)
-        const { data: dormsData, error: dormsError } = await supabase
+        const { data: dormsData, count: totalDorms, error: dormsError } = await supabase
           .from('dorms')
-          .select('*')
+          .select('*', { count: 'exact' })
           .eq('owner_id', user.id);
 
         if (dormsError) throw dormsError;
@@ -106,21 +129,13 @@ export default function Profile() {
           verification_status: verificationStatus,
         };
 
+        mergedProfile.behavior_preferences = renterRes.data?.behavior_preferences || {};
+        mergedProfile.avatar_url = mergedProfile.avatar_url || user.user_metadata?.avatar_url || user.user_metadata?.picture || '';
         setProfile(mergedProfile);
         setDorms(dormsData || []);
+        setDormCount(totalDorms || 0);
         setEditedProfile(mergedProfile);
 
-        const { count, error: notifError } = await supabase
-          .from('notifications')
-          .select('*', { count: 'exact', head: true })
-          .eq('user_id', user.id)
-          .eq('read', false);
-
-        if (!notifError && count !== null) {
-          setUnreadCount(count);
-        } else {
-          setUnreadCount(0);
-        }
       } catch (error) {
         console.error('Error loading profile:', error);
       } finally {
@@ -138,18 +153,20 @@ export default function Profile() {
     const fullName = String(editedProfile.full_name || '').trim();
 
     if (username.length < 3 || username.length > 30 || !/^[a-zA-Z0-9_]+$/.test(username)) {
-      Alert.alert('Invalid username', 'Use 3–30 letters, numbers, or underscores.');
+      showError('Invalid username', 'Use 3–30 letters, numbers, or underscores.');
       return;
     }
     if (!fullName || fullName.length > 80) {
-      Alert.alert('Invalid name', 'Enter a name between 1 and 80 characters.');
+      showError('Invalid name', 'Enter a name between 1 and 80 characters.');
       return;
     }
 
+    const phone = String(editedProfile.phone_number || '').trim();
+    if (phone && !/^\+?[0-9][0-9 ()-]{6,19}$/.test(phone)) { showError('Invalid phone number', 'Enter a valid contact number.'); return; }
     setSaving(true);
     try {
       const avatarUrl = avatarUri
-        ? await uploadImage(`${user.id}/avatar/${Date.now()}.${avatarUri.split('.').pop() || 'jpg'}`, avatarUri)
+        ? await uploadImage(`${user.id}/avatar/${Date.now()}.${getSafeImageExtension(avatarUri)}`, avatarUri)
         : editedProfile.avatar_url;
       // Update Supabase auth user metadata
       await supabase.auth.updateUser({
@@ -167,6 +184,7 @@ export default function Profile() {
         full_name: fullName,
         username,
         avatar_url: avatarUrl,
+        phone_number: phone || null,
         updated_at: new Date().toISOString(),
       };
 
@@ -185,7 +203,7 @@ export default function Profile() {
       Alert.alert('Profile saved', 'Your profile details were updated.');
     } catch (error) {
       console.error('Error saving profile:', error);
-      Alert.alert('Could not save profile', error instanceof Error ? error.message : 'Please try again.');
+      showError('Could not save profile', error instanceof Error ? error.message : 'Please try again.');
     } finally {
       setSaving(false);
     }
@@ -194,11 +212,12 @@ export default function Profile() {
   // Preference Modal Handlers
   const handleOpenPrefModal = () => {
     const prefs = profile?.behavior_preferences || {};
+    setExtraPreferences({ amenities: prefs.amenities || [], utilities: prefs.utilities || [], house_rules: prefs.house_rules || [], gender_policy: prefs.gender_policy || '', curfew: prefs.curfew || '', room_type: prefs.room_type || '', lgu_certified: Boolean(prefs.lgu_certified), furnished: Boolean(prefs.furnished) });
     setPrefForm({
       budget_min: prefs.budget_min ? String(prefs.budget_min) : '',
       budget_max: prefs.budget_max ? String(prefs.budget_max) : '',
       preferred_location: prefs.preferred_location || '',
-      radius_km: String(prefs.radius_km || 10),
+      radius_km: String(prefs.radius_km || 5),
       parking: prefs.parking || '',
       pet_friendly: Boolean(prefs.pet_friendly),
       latitude: Number(prefs.latitude) || UCLM_COORDINATES.latitude,
@@ -215,64 +234,58 @@ export default function Profile() {
       longitude: coords.longitude,
     }));
 
-    try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status === 'granted') {
-        const [geo] = await Location.reverseGeocodeAsync(coords);
-        if (geo) {
-          const areaParts = [geo.name, geo.district || geo.subregion, geo.city].filter(Boolean);
-          const areaName = areaParts.slice(0, 2).join(', ');
-          if (areaName) {
-            setPrefForm((prev) => ({
-              ...prev,
-              preferred_location: areaName,
-            }));
-          }
-        }
-      }
-    } catch (err) {
-      console.error('Error reverse geocoding location:', err);
-    }
+    // Coordinates are the source of truth; reverse geocoding is not required to save a pin.
+    setPrefForm((prev) => ({ ...prev, preferred_location: 'Pinned area (' + coords.latitude.toFixed(4) + ', ' + coords.longitude.toFixed(4) + ')' }));
   };
 
   const handleSavePreferencesOnly = async () => {
     if (!user) return;
-    const bMin = Number(prefForm.budget_min) || null;
-    const bMax = Number(prefForm.budget_max) || null;
+    const bMin = prefForm.budget_min.trim() ? Number(prefForm.budget_min) : null;
+    const bMax = prefForm.budget_max.trim() ? Number(prefForm.budget_max) : null;
+
+    if ((bMin !== null && !Number.isFinite(bMin)) || (bMax !== null && !Number.isFinite(bMax))) {
+      showError('Invalid budget', 'Enter a valid amount in pesos.');
+      return;
+    }
 
     if (bMin !== null && bMin < 0) {
-      Alert.alert('Invalid budget', 'Minimum budget cannot be negative.');
+      showError('Invalid budget', 'Minimum budget cannot be negative.');
       return;
     }
     if (bMax !== null && bMax < 0) {
-      Alert.alert('Invalid budget', 'Maximum budget cannot be negative.');
+      showError('Invalid budget', 'Maximum budget cannot be negative.');
       return;
     }
     if (bMin !== null && bMax !== null && bMin > bMax) {
-      Alert.alert('Invalid budget', 'Maximum budget must be greater than or equal to minimum budget.');
+      showError('Invalid budget', 'Maximum budget must be greater than or equal to minimum budget.');
       return;
     }
 
+    const radius = Number(prefForm.radius_km);
+    if (!Number.isFinite(radius) || radius <= 0 || radius > 20000) { showError('Invalid radius', 'Enter a positive distance in kilometers.'); return; }
     setSavingPref(true);
     try {
       const newPreferences = {
+        ...extraPreferences,
         budget_min: bMin,
         budget_max: bMax,
         preferred_location: prefForm.preferred_location.trim().slice(0, 120),
         latitude: prefForm.latitude,
         longitude: prefForm.longitude,
-        radius_km: Math.max(1, Math.min(50, Number(prefForm.radius_km) || 10)),
+        radius_km: radius,
         pet_friendly: Boolean(prefForm.pet_friendly),
         parking: prefForm.parking,
       };
 
       const { error } = await supabase
         .from('renters')
-        .update({
+        .upsert({
+          renter_id: user.id,
           behavior_preferences: newPreferences,
           updated_at: new Date().toISOString(),
-        })
-        .eq('renter_id', user.id);
+        }, { onConflict: 'renter_id' })
+        .select('renter_id')
+        .single();
 
       if (error) throw error;
 
@@ -282,18 +295,19 @@ export default function Profile() {
       };
       setProfile(updatedProfile);
       setEditedProfile(updatedProfile);
+      await refreshPreferences();
       setPrefModalVisible(false);
       Alert.alert('Preferences Saved', 'Your dorm preferences have been successfully updated.');
     } catch (err: any) {
       console.error('Error saving preferences:', err);
-      Alert.alert('Could not save preferences', err.message || 'Please try again.');
+      showError('Could not save preferences', err.message || 'Please try again.');
     } finally {
       setSavingPref(false);
     }
   };
 
   const pickAvatar = async () => {
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, aspect: [1, 1], quality: 0.75 });
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, aspect: [1, 1], quality: 0.75 });
     if (!result.canceled) setAvatarUri(result.assets[0].uri);
   };
 
@@ -343,7 +357,7 @@ export default function Profile() {
       {editMode ? (
         <View style={styles.editForm}>
           <Text style={styles.formLabel}>Full Name</Text>
-          <TextInput
+          <TextInput placeholderTextColor={AppColors.placeholder}
             style={styles.input}
             value={editedProfile.full_name || ''}
             onChangeText={(text) => setEditedProfile((prev: any) => ({ ...prev, full_name: text }))}
@@ -351,13 +365,15 @@ export default function Profile() {
           />
 
           <Text style={styles.formLabel}>Username</Text>
-          <TextInput
+          <TextInput placeholderTextColor={AppColors.placeholder}
             style={styles.input}
             value={editedProfile.username || ''}
             onChangeText={(text) => setEditedProfile((prev: any) => ({ ...prev, username: text }))}
             placeholder="Choose a username"
           />
 
+          <Text style={styles.formLabel}>Phone number</Text>
+          <TextInput placeholderTextColor={AppColors.placeholder} style={styles.input} keyboardType="phone-pad" maxLength={21} value={editedProfile.phone_number || ''} onChangeText={(phone_number) => setEditedProfile((current: any) => ({ ...current, phone_number }))} placeholder="Contact number" />
           <Text style={styles.formLabel}>Profile photo</Text>
           <Pressable onPress={pickAvatar} style={styles.photoPicker}>
             <Image source={avatarUri ? { uri: avatarUri } : editedProfile.avatar_url ? { uri: editedProfile.avatar_url } : require('../../assets/placeholder.jpg')} style={styles.photoPickerImage} />
@@ -388,7 +404,7 @@ export default function Profile() {
           )}
 
           <Text style={styles.name}>{profile?.full_name || profile?.email || 'Anonymous'}</Text>
-          <Text style={styles.username}>@{profile?.username || 'username'}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5 }}>{profile?.role === 'owner' && profile?.verification_status === 'approved' && <Ionicons name="checkmark-circle" size={17} color={AppColors.accent} />}<Text style={styles.username}>@{profile?.username || 'username'}</Text></View>
           <Text style={styles.email}>{profile?.email || 'No email'}</Text>
 
           {/* Role Badge */}
@@ -403,12 +419,12 @@ export default function Profile() {
               profile?.role === 'owner' && styles.ownerBadgeText,
             ]}>
               {profile?.role === 'admin' && 'Administrator'}
-              {profile?.role === 'owner' && (profile?.verification_status === 'approved' ? 'Verified Dorm Owner' : profile?.verification_status === 'pending' ? 'Pending Verification' : 'Dorm Owner')}
+              {profile?.role === 'owner' && (profile?.verification_status === 'approved' ? 'Dorm Owner' : profile?.verification_status === 'pending' ? 'Pending Verification' : 'Dorm Owner')}
               {profile?.role === 'renter' && 'Renter'}
             </Text>
           </View>
 
-          {profile?.role === 'renter' && (
+          {profile && (
             <View style={styles.preferenceSummary}>
               <View style={styles.preferenceSummaryHeader}>
                 <Text style={styles.preferenceSummaryTitle}>My dorm preferences</Text>
@@ -422,20 +438,10 @@ export default function Profile() {
                   ? `₱${Number(profile?.behavior_preferences?.budget_min || 0).toLocaleString('en-PH')} – ₱${Number(profile?.behavior_preferences?.budget_max || 0).toLocaleString('en-PH')}`
                   : 'Any budget'}
                 {' · '}{profile?.behavior_preferences?.preferred_location || 'Any location'}
-                {' · '}{profile?.behavior_preferences?.radius_km || 10} km
+                {' · '}{profile?.behavior_preferences?.radius_km || 5} km
                 {profile?.behavior_preferences?.parking ? ` · ${profile.behavior_preferences.parking} parking` : ''}
                 {profile?.behavior_preferences?.pet_friendly ? ' · Pet-friendly' : ''}
               </Text>
-            </View>
-          )}
-
-          {/* Stats Container (only for owners/admins) */}
-          {(profile?.role === 'owner' || profile?.role === 'admin') && (
-            <View style={styles.statsContainer}>
-              <View style={styles.statBox}>
-                <Text style={styles.statLabel}>Dorms Listed</Text>
-                <Text style={styles.statValue}>{dorms.length}</Text>
-              </View>
             </View>
           )}
 
@@ -467,35 +473,41 @@ export default function Profile() {
       {(profile?.role === 'owner' || profile?.role === 'admin') && (
         <View style={styles.sectionsContainer}>
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>My Dorm Listings</Text>
+            <Pressable onPress={() => setListingsOpen((value) => !value)} accessibilityLabel="Toggle my dorm listings" style={{ flexDirection: 'row', alignItems: 'center', gap: 5, flexShrink: 1 }}><Text style={[styles.sectionTitle, { flexShrink: 1 }]}>My Dorm Listings ({dormCount})</Text><Ionicons name={listingsOpen ? "chevron-up" : "chevron-down"} size={17} color={AppColors.textSecondary} /></Pressable>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <Pressable accessibilityLabel={showRequestsIcon ? 'Rental requests' : 'Current tenants'} onPress={() => router.push({ pathname: '/owner-panel', params: { tab: showRequestsIcon ? 'requests' : 'tenants' } } as never)} style={{ padding: 8 }}>
+              <Ionicons name={showRequestsIcon ? 'mail-outline' : 'people-outline'} size={23} color={AppColors.accent} />
+              {(showRequestsIcon ? requestUnreadCount > 0 : tenantUnreadCount > 0) && <View style={styles.newActivityDot} />}
+            </Pressable>
             <Pressable style={styles.addDormButton} onPress={() => router.push('/add-dorm' as any)}>
               <Text style={styles.addDormButtonText}>+ Add Dorm</Text>
             </Pressable>
+            </View>
           </View>
 
-          {dorms.length > 0 ? (
+          {listingsOpen && (dorms.length > 0 ? (
             <View style={styles.dormListContent}>
               {dorms.map((item: any) => (
-                <View key={item.dorm_id} style={styles.dormItem}>
+                <Pressable key={item.dorm_id} onPress={() => router.push(`/(tabs)/${item.dorm_id}` as never)} style={styles.dormItem}>
                   <Text style={styles.dormName}>{item.name}</Text>
                   <Text style={styles.dormPrice}>₱{item.price}/month</Text>
                   <Text style={styles.dormStatus}>
                     {item.available ? 'Available' : 'Not Available'}
                   </Text>
-                </View>
+                </Pressable>
               ))}
             </View>
           ) : (
             <Text style={styles.noDormsText}>You haven&apos;t listed any dorms yet. Add your first dorm!</Text>
-          )}
+          ))}
         </View>
       )}
 
       <View style={styles.signOutContainer}>
         <View style={styles.profileLinks}>
-          <Pressable style={styles.profileLink} onPress={() => router.push('/chat')}><Ionicons name="sparkles-outline" size={21} color={AppColors.accent} /><Text style={styles.profileLinkText}>Dorm Assistant</Text></Pressable>
-          <Pressable style={styles.profileLink} onPress={() => router.push('/(tabs)/settings')}><Ionicons name="settings-outline" size={21} color={AppColors.accent} /><Text style={styles.profileLinkText}>Settings</Text></Pressable>
-          <Pressable style={styles.profileLink} onPress={() => router.push('/(tabs)/about-us')}><Ionicons name="information-circle-outline" size={21} color={AppColors.accent} /><Text style={styles.profileLinkText}>About SNAP</Text></Pressable>
+          <Pressable style={styles.profileLink} onPress={() => router.push('/chat')}><MaterialCommunityIcons name="robot-happy-outline" size={29} color={AppColors.accent} /><Text style={styles.profileLinkText}>Dorm Assistant</Text></Pressable>
+          <Pressable style={styles.profileLink} onPress={() => router.push('/(tabs)/settings')}><Ionicons name="settings-outline" size={26} color={AppColors.accent} /><Text style={styles.profileLinkText}>Settings</Text></Pressable>
+          <Pressable style={styles.profileLink} onPress={() => router.push('/(tabs)/about-us')}><Ionicons name="information-circle-outline" size={26} color={AppColors.accent} /><Text style={styles.profileLinkText}>About SNAP</Text></Pressable>
         </View>
         {/* Notifications Button */}
         <View style={{ marginBottom: 12 }}>
@@ -505,24 +517,10 @@ export default function Profile() {
           >
             <Text style={styles.notificationsButtonText}>Notifications</Text>
             {unreadCount > 0 && (
-              <View style={styles.unreadBadge}>
-                <Text style={styles.unreadBadgeText}>{unreadCount}</Text>
-              </View>
+              <View style={[styles.newActivityDot, { position: 'relative', top: 0, right: 0 }]} />
             )}
           </Pressable>
         </View>
-
-        {/* Owner Dashboard Button */}
-        {(profile?.role === 'owner' || profile?.role === 'admin') && (
-          <View style={{ marginBottom: 12 }}>
-            <Pressable
-              style={styles.ownerButton}
-              onPress={() => router.push('/owner-panel' as any)}
-            >
-              <Text style={styles.ownerButtonText}>Owner Dashboard</Text>
-            </Pressable>
-          </View>
-        )}
 
         {profile?.role === 'admin' && (
           <View style={{ marginBottom: 12 }}>
@@ -534,8 +532,8 @@ export default function Profile() {
             </Pressable>
           </View>
         )}
-        <Pressable style={styles.signOutButton} onPress={handleSignOut}>
-          <Text style={styles.signOutButtonText}>Sign Out</Text>
+        <Pressable style={styles.notificationsButton} onPress={handleSignOut}>
+          <Text style={styles.notificationsButtonText}>Sign Out</Text>
         </Pressable>
       </View>
 
@@ -570,7 +568,7 @@ export default function Profile() {
                     value={prefForm.budget_min}
                     onChangeText={(val) => setPrefForm((prev) => ({ ...prev, budget_min: val.replace(/\D/g, '') }))}
                     placeholder="₱0"
-                    placeholderTextColor={AppColors.textMuted}
+                    placeholderTextColor={AppColors.placeholder}
                   />
                 </View>
                 <View style={{ flex: 1 }}>
@@ -581,7 +579,7 @@ export default function Profile() {
                     value={prefForm.budget_max}
                     onChangeText={(val) => setPrefForm((prev) => ({ ...prev, budget_max: val.replace(/\D/g, '') }))}
                     placeholder="₱10,000"
-                    placeholderTextColor={AppColors.textMuted}
+                    placeholderTextColor={AppColors.placeholder}
                   />
                 </View>
               </View>
@@ -594,7 +592,7 @@ export default function Profile() {
                 value={prefForm.preferred_location}
                 onChangeText={(val) => setPrefForm((prev) => ({ ...prev, preferred_location: val }))}
                 placeholder="e.g. Barangay, school, or workplace"
-                placeholderTextColor={AppColors.textMuted}
+                placeholderTextColor={AppColors.placeholder}
               />
 
               <Pressable
@@ -616,7 +614,7 @@ export default function Profile() {
                     <LeafletMapView
                       dorms={[]}
                       center={{ latitude: prefForm.latitude, longitude: prefForm.longitude }}
-                      radiusKm={Number(prefForm.radius_km) || 10}
+                      radiusKm={Number(prefForm.radius_km) || 5}
                       userLocation={null}
                       showAnalytics={false}
                       pickerLocation={{ latitude: prefForm.latitude, longitude: prefForm.longitude }}
@@ -630,14 +628,14 @@ export default function Profile() {
               )}
 
               {/* Radius Input */}
-              <Text style={styles.formLabel}>Search Radius (1–50 km)</Text>
+              <Text style={styles.formLabel}>Search Radius (km)</Text>
               <TextInput
                 style={styles.input}
-                keyboardType="number-pad"
+                keyboardType="decimal-pad"
                 value={prefForm.radius_km}
-                onChangeText={(val) => setPrefForm((prev) => ({ ...prev, radius_km: val.replace(/\D/g, '').slice(0, 2) }))}
-                placeholder="10"
-                placeholderTextColor={AppColors.textMuted}
+                onChangeText={(val) => setPrefForm((prev) => ({ ...prev, radius_km: val.replace(/[^0-9.]/g, '').slice(0, 8) }))}
+                placeholder="5"
+                placeholderTextColor={AppColors.placeholder}
               />
 
               {/* Parking Preference */}
@@ -669,6 +667,13 @@ export default function Profile() {
                 </Text>
               </Pressable>
 
+<Text style={styles.formLabel}>Amenities</Text><View style={styles.preferenceChips}>{["Wi-Fi","Air Conditioning","Laundry","Kitchen","Study Area","Furnished","Security"].map((choice) => <Pressable key={choice} onPress={() => setExtraPreferences((current) => ({ ...current, amenities: current.amenities.includes(choice) ? current.amenities.filter((item) => item !== choice) : [...current.amenities, choice] }))} style={[styles.preferenceChip, extraPreferences.amenities.includes(choice) && styles.preferenceChipActive]}><Text style={styles.preferenceChipText}>{choice}</Text></Pressable>)}</View>
+<Text style={styles.formLabel}>Utilities</Text><View style={styles.preferenceChips}>{["Water","Electricity","Internet","Generator"].map((choice) => <Pressable key={choice} onPress={() => setExtraPreferences((current) => ({ ...current, utilities: current.utilities.includes(choice) ? current.utilities.filter((item) => item !== choice) : [...current.utilities, choice] }))} style={[styles.preferenceChip, extraPreferences.utilities.includes(choice) && styles.preferenceChipActive]}><Text style={styles.preferenceChipText}>{choice}</Text></Pressable>)}</View>
+<Text style={styles.formLabel}>House rules</Text><View style={styles.preferenceChips}>{["No smoking","No parties","Quiet hours","Visitors allowed","Keep common areas clean"].map((choice) => <Pressable key={choice} onPress={() => setExtraPreferences((current) => ({ ...current, house_rules: current.house_rules.includes(choice) ? current.house_rules.filter((item) => item !== choice) : [...current.house_rules, choice] }))} style={[styles.preferenceChip, extraPreferences.house_rules.includes(choice) && styles.preferenceChipActive]}><Text style={styles.preferenceChipText}>{choice}</Text></Pressable>)}</View>
+<Text style={styles.formLabel}>Gender policy</Text><View style={styles.preferenceChips}>{["male","female","co-ed"].map((choice) => <Pressable key={choice} onPress={() => setExtraPreferences((current) => ({ ...current, gender_policy: current.gender_policy === choice ? '' : choice }))} style={[styles.preferenceChip, extraPreferences.gender_policy === choice && styles.preferenceChipActive]}><Text style={styles.preferenceChipText}>{choice}</Text></Pressable>)}</View>
+<Text style={styles.formLabel}>Room type</Text><View style={styles.preferenceChips}>{["Bed space","Shared room","Private room","Studio","Apartment"].map((choice) => <Pressable key={choice} onPress={() => setExtraPreferences((current) => ({ ...current, room_type: current.room_type === choice ? '' : choice }))} style={[styles.preferenceChip, extraPreferences.room_type === choice && styles.preferenceChipActive]}><Text style={styles.preferenceChipText}>{choice}</Text></Pressable>)}</View>
+<Text style={styles.formLabel}>Curfew</Text><View style={styles.preferenceChips}>{["No curfew","With curfew"].map((choice) => <Pressable key={choice} onPress={() => setExtraPreferences((current) => ({ ...current, curfew: current.curfew === choice ? '' : choice }))} style={[styles.preferenceChip, extraPreferences.curfew === choice && styles.preferenceChipActive]}><Text style={styles.preferenceChipText}>{choice}</Text></Pressable>)}</View>
+<View style={styles.preferenceChips}>{(['lgu_certified', 'furnished'] as const).map((key) => <Pressable key={key} onPress={() => setExtraPreferences((current) => ({ ...current, [key]: !current[key] }))} style={[styles.preferenceChip, extraPreferences[key] && styles.preferenceChipActive]}><Text style={styles.preferenceChipText}>{key === 'lgu_certified' ? 'LGU certified' : 'Furnished'}</Text></Pressable>)}</View>
               {/* Save & Cancel Buttons */}
               <Pressable disabled={savingPref} style={styles.saveButton} onPress={handleSavePreferencesOnly}>
                 {savingPref ? (
@@ -683,12 +688,14 @@ export default function Profile() {
             </ScrollView>
           </View>
         </View>
+        <ErrorToast />
       </Modal>
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
+  newActivityDot: { position: 'absolute', top: 3, right: 3, width: 7, height: 7, borderRadius: 4, backgroundColor: AppColors.error },
   container: {
     flex: 1,
     backgroundColor: AppColors.background,
@@ -930,7 +937,7 @@ const styles = StyleSheet.create({
     paddingBottom: 40,
   },
   profileLinks: { flexDirection: 'row', justifyContent: 'center', gap: 10, marginBottom: 14 },
-  profileLink: { width: 92, minHeight: 76, alignItems: 'center', justifyContent: 'center', gap: 7, padding: 9, borderRadius: BorderRadius.lg, borderWidth: 1, borderColor: AppColors.border, backgroundColor: AppColors.surface },
+  profileLink: { width: 92, minHeight: 76, alignItems: 'center', justifyContent: 'center', gap: 8, padding: 9 },
   profileLinkText: { color: AppColors.text, fontSize: 10, fontWeight: '700', textAlign: 'center' },
   photoPicker: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 10, marginTop: 6, marginBottom: 12, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: AppColors.border, backgroundColor: AppColors.surfaceElevated },
   photoPickerImage: { width: 58, height: 58, borderRadius: 29 },

@@ -53,7 +53,7 @@ export function FilterSheet({ visible, filters, onApply, onClose }: Props) {
                 style={styles.input}
                 keyboardType="number-pad"
                 placeholder="Minimum"
-                placeholderTextColor={AppColors.textMuted}
+                placeholderTextColor={AppColors.placeholder}
                 value={draft.minPrice === null ? '' : String(draft.minPrice)}
                 onChangeText={(value) => setDraft({ ...draft, minPrice: value ? Number(value) : null })}
               />
@@ -61,7 +61,7 @@ export function FilterSheet({ visible, filters, onApply, onClose }: Props) {
                 style={styles.input}
                 keyboardType="number-pad"
                 placeholder="Maximum"
-                placeholderTextColor={AppColors.textMuted}
+                placeholderTextColor={AppColors.placeholder}
                 value={draft.maxPrice === null ? '' : String(draft.maxPrice)}
                 onChangeText={(value) => setDraft({ ...draft, maxPrice: value ? Number(value) : null })}
               />
@@ -69,11 +69,12 @@ export function FilterSheet({ visible, filters, onApply, onClose }: Props) {
 
             <Text style={styles.label}>Within {draft.radiusKm} km</Text>
             <View style={styles.chips}>
-              {[1, 3, 5, 10, 20].map((radius) => (
+              {[1, 2, 3, 5, 8].map((radius) => (
                 <Chip key={radius} label={`${radius} km`} selected={draft.radiusKm === radius} onPress={() => setDraft({ ...draft, radiusKm: radius })} />
               ))}
             </View>
 
+            <TextInput placeholderTextColor={AppColors.placeholder} accessibilityLabel="Custom search radius in kilometers" keyboardType="decimal-pad" style={styles.input} value={String(draft.radiusKm)} onChangeText={(value) => { const radiusKm = Number(value); if (Number.isFinite(radiusKm) && radiusKm > 0 && radiusKm <= 20000) setDraft({ ...draft, radiusKm }); }} />
             <Text style={styles.label}>Gender policy</Text>
             <View style={styles.chips}>
               {[

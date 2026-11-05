@@ -1,5 +1,10 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { completeOAuthRedirect, SIGNUP_ROLE_KEY } from '@/lib/account-profile';
+import { AuthBrand, GoogleMark } from '@/components/auth-brand';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { showError } from '@/components/error-toast';
 import { useState } from 'react';
-import { View, Text, TextInput, StyleSheet, Alert, Pressable, Platform } from 'react-native';
+import { View, Text, TextInput, ScrollView, StyleSheet, Pressable, Platform, useWindowDimensions } from 'react-native';
 import { supabase } from '../../src/lib/supabase';
 import { useRouter } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
@@ -9,6 +14,8 @@ WebBrowser.maybeCompleteAuthSession();
 
 export default function SignIn() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const { height } = useWindowDimensions();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -19,9 +26,9 @@ export default function SignIn() {
     try {
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) throw error;
-      router.replace('/' as any);
+      router.replace('/' as never);
     } catch (error: any) {
-      Alert.alert('Error', error.message);
+      showError('Error', error.message);
     } finally {
       setLoading(false);
     }
@@ -30,6 +37,7 @@ export default function SignIn() {
   const handleGoogleSignIn = async () => {
     setGoogleLoading(true);
     try {
+      await AsyncStorage.removeItem(SIGNUP_ROLE_KEY);
       let redirectTo: string;
       if (Platform.OS === 'web') {
         redirectTo = `${window.location.origin}/auth/callback`;
@@ -39,7 +47,7 @@ export default function SignIn() {
 
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
-        options: { redirectTo },
+        options: { redirectTo, skipBrowserRedirect: Platform.OS !== 'web' },
       });
 
       if (error) throw error;
@@ -49,27 +57,12 @@ export default function SignIn() {
       if (data?.url) {
         const result = await WebBrowser.openAuthSessionAsync(data.url, redirectTo);
         if (result.type === 'success') {
-          const { url } = result;
-          const params = url.split('#')[1] || url.split('?')[1];
-          if (params) {
-            const dict: { [key: string]: string } = {};
-            params.split('&').forEach((pair) => {
-              const [k, v] = pair.split('=');
-              dict[k] = decodeURIComponent(v);
-            });
-            if (dict.access_token && dict.refresh_token) {
-              const { error: sessionError } = await supabase.auth.setSession({
-                access_token: dict.access_token,
-                refresh_token: dict.refresh_token,
-              });
-              if (sessionError) throw sessionError;
-              router.replace('/' as any);
-            }
-          }
+          await completeOAuthRedirect(result.url);
+          router.replace('/' as never);
         }
       }
     } catch (error: any) {
-      Alert.alert('Google Sign-In Error', error.message);
+      showError('Google Sign-In Error', error.message);
     } finally {
       if (Platform.OS !== 'web') {
         setGoogleLoading(false);
@@ -78,13 +71,11 @@ export default function SignIn() {
   };
 
   return (
-    <View style={styles.container}>
-      <View style={styles.brandBlock}>
-        <Text style={styles.brandName}>Room Scout</Text>
-        <Text style={styles.brandTagline}>Find your space near campus</Text>
-      </View>
-
-      <Text style={styles.title}>Sign In</Text>
+    <ScrollView style={{ backgroundColor: AppColors.background }} contentContainerStyle={[styles.container, { paddingTop: insets.top + 20, paddingBottom: insets.bottom + 24 }]} keyboardShouldPersistTaps="handled">
+      <View style={[styles.logoHeader, { paddingTop: Math.min(40, height * 0.045) }]}><AuthBrand /></View>
+      <View style={styles.formArea}>
+      <View style={styles.form}>
+      <Text style={styles.title}>Sign Into RoomScout</Text>
 
       <View style={styles.inputGroup}>
         <Text style={styles.label}>Email</Text>
@@ -93,7 +84,7 @@ export default function SignIn() {
           value={email}
           onChangeText={setEmail}
           placeholder="Enter your email"
-          placeholderTextColor={AppColors.textMuted}
+          placeholderTextColor={AppColors.placeholder}
           autoCapitalize="none"
           keyboardType="email-address"
         />
@@ -106,7 +97,7 @@ export default function SignIn() {
           value={password}
           onChangeText={setPassword}
           placeholder="Enter your password"
-          placeholderTextColor={AppColors.textMuted}
+          placeholderTextColor={AppColors.placeholder}
           secureTextEntry
         />
       </View>
@@ -124,9 +115,12 @@ export default function SignIn() {
         onPress={handleGoogleSignIn}
         disabled={loading || googleLoading}
       >
+        <View style={styles.googleContent}>
+        <GoogleMark />
         <Text style={styles.googleButtonText}>
           {googleLoading ? 'Connecting...' : 'Sign In with Google'}
         </Text>
+        </View>
       </Pressable>
 
       <Text
@@ -135,17 +129,22 @@ export default function SignIn() {
       >
         Don&apos;t have an account? Sign up
       </Text>
-    </View>
+      </View>
+      </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
+    flexGrow: 1,
     padding: 24,
     backgroundColor: AppColors.background,
-    justifyContent: 'center',
+    alignItems: 'center',
   },
+  logoHeader: { width: '100%', paddingTop: 8, paddingBottom: 16 },
+  formArea: { flexGrow: 1, width: '100%', justifyContent: 'center', paddingVertical: 16 },
+  form: { width: '100%', maxWidth: 440, alignSelf: 'center' },
   brandBlock: {
     marginBottom: 40,
     alignItems: 'center',
@@ -200,6 +199,8 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   googleButton: {
+    justifyContent: 'center',
+    minHeight: 50,
     backgroundColor: AppColors.surfaceElevated,
     borderWidth: 1,
     borderColor: AppColors.border,
@@ -208,6 +209,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 12,
   },
+  googleContent: { width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 16 },
   googleButtonText: {
     color: AppColors.text,
     fontSize: 16,

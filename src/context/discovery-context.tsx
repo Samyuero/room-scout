@@ -10,14 +10,16 @@ import {
   useState,
   type PropsWithChildren,
 } from 'react';
-import { isPhilippinesCoordinates, UCLM_COORDINATES } from '@/constants/map';
-import { filterAndRankDorms, normalizeDorm, rankDorms } from '@/lib/dorm-discovery';
+import { Platform } from 'react-native';
+import { isPhilippinesCoordinates } from '@/constants/map';
+import { filterAndRankDorms, hasDormPreferences, normalizeDorm, rankDorms } from '@/lib/dorm-discovery';
 import { getErrorMessage, logEvent } from '@/lib/logger';
 import { isSupabaseConfigured, supabase, supabaseConfigurationMessage } from '@/lib/supabase';
 import {
   DEFAULT_DORM_FILTERS,
   type Dorm,
   type DormFilters,
+  type DormPreferences,
   type UserCoordinates,
 } from '@/types/dorm';
 
@@ -25,12 +27,13 @@ import {
 const DORMS_CACHE_KEY = 'room_scout_dorms_v1';
 const COMPARE_CACHE_KEY = 'room_scout_compare_v1';
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const COMPARE_LIMIT = 3;
+const COMPARE_LIMIT = 2;
 
 type CompareResult = 'added' | 'removed' | 'limit';
 
 interface DiscoveryValue {
   dorms: Dorm[];
+  allRankedDorms: Dorm[];
   rankedDorms: Dorm[];
   nearbyDorms: Dorm[];
   filters: DormFilters;
@@ -45,6 +48,9 @@ interface DiscoveryValue {
   location: UserCoordinates | null;
   locationLoading: boolean;
   locationMessage: string | null;
+  preferences: DormPreferences | null;
+  hasPreferences: boolean;
+  refreshPreferences: () => Promise<void>;
   requestLocation: () => Promise<void>;
   compareIds: string[];
   comparedDorms: Dorm[];
@@ -65,6 +71,7 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
   const [location, setLocation] = useState<UserCoordinates | null>(null);
   const [locationLoading, setLocationLoading] = useState(false);
   const [locationMessage, setLocationMessage] = useState<string | null>(null);
+  const [preferences, setPreferences] = useState<DormPreferences | null>(null);
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const realtimeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -85,15 +92,29 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
     else setLoading(true);
 
     try {
-      let response = await supabase.from('dorms').select('*, dorm_reviews(rating)').limit(200);
-      if (response.error) response = await supabase.from('dorms').select('*').limit(200);
+      let response = await supabase
+        .from('dorms')
+        .select('*, dorm_reviews(rating)')
+        .eq('approval_status', 'approved')
+        .eq('status', 'active')
+        .order('created_at', { ascending: false })
+        .limit(200);
+      if (response.error) {
+        response = await supabase
+          .from('dorms')
+          .select('*')
+          .eq('approval_status', 'approved')
+          .eq('status', 'active')
+          .order('created_at', { ascending: false })
+          .limit(200);
+      }
       if (response.error) throw response.error;
 
       const normalized = (response.data || []).map((row) => normalizeDorm(row));
       await storeDorms(normalized);
       setIsUsingCachedData(false);
       setError(null);
-      logEvent('info', 'dorms_refreshed', { count: normalized.length });
+      // Successful background refreshes are intentionally quiet in development.
     } catch (caught) {
       const message = getErrorMessage(caught, 'Could not refresh dorms.');
       setError(message);
@@ -103,6 +124,26 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
       setRefreshing(false);
     }
   }, [storeDorms]);
+
+  const refreshPreferences = useCallback(async () => {
+    if (!isSupabaseConfigured) return;
+    const { data: authData } = await supabase.auth.getUser();
+    const userId = authData.user?.id;
+    if (!userId) {
+      setPreferences(null);
+      return;
+    }
+    const { data, error: preferenceError } = await supabase
+      .from('renters')
+      .select('behavior_preferences')
+      .eq('renter_id', userId)
+      .maybeSingle();
+    if (preferenceError) {
+      logEvent('warn', 'preferences_read_failed', { message: getErrorMessage(preferenceError) });
+      return;
+    }
+    setPreferences((data?.behavior_preferences as DormPreferences | null) || null);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -141,6 +182,12 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
   }, [fetchDorms]);
 
   useEffect(() => {
+    void refreshPreferences();
+    const { data } = supabase.auth.onAuthStateChange(() => { setTimeout(() => void refreshPreferences(), 0); });
+    return () => data.subscription.unsubscribe();
+  }, [refreshPreferences]);
+
+  useEffect(() => {
     if (!isSupabaseConfigured) return;
     const scheduleRefresh = () => {
       if (realtimeTimer.current) clearTimeout(realtimeTimer.current);
@@ -164,9 +211,12 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
       if (permission.status !== 'granted') return;
       const lastKnown = await Location.getLastKnownPositionAsync();
       if (lastKnown && isPhilippinesCoordinates(lastKnown.coords)) {
-        setLocation({ latitude: lastKnown.coords.latitude, longitude: lastKnown.coords.longitude });
-      } else {
-        setLocation({ latitude: UCLM_COORDINATES.latitude, longitude: UCLM_COORDINATES.longitude });
+        setLocation({
+          latitude: lastKnown.coords.latitude,
+          longitude: lastKnown.coords.longitude,
+          accuracy_m: lastKnown.coords.accuracy,
+        });
+        setLocationMessage('Showing your most recent device location while GPS refreshes.');
       }
     }
     restoreGrantedLocation().catch((caught) => {
@@ -183,19 +233,44 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
         setLocationMessage('Location is off. Search by area and price is still available.');
         return;
       }
-      const current = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      if (current?.coords && isPhilippinesCoordinates(current.coords)) {
-        setLocation({ latitude: current.coords.latitude, longitude: current.coords.longitude });
-        setLocationMessage('Nearby ranking is using your current location.');
+
+      let servicesEnabled = await Location.hasServicesEnabledAsync();
+      if (!servicesEnabled && Platform.OS === 'android') {
+        try {
+          await Location.enableNetworkProviderAsync();
+          servicesEnabled = await Location.hasServicesEnabledAsync();
+        } catch {
+          // The user can decline Android's high-accuracy prompt; keep the screen usable.
+        }
+      }
+      if (!servicesEnabled) {
+        setLocationMessage('Turn on Location in Android settings, then tap Location again. The map remains centered on Opao.');
+        return;
+      }
+
+      const current = await Promise.race([
+        Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 15000)),
+      ]);
+      const fallback = current || await Location.getLastKnownPositionAsync({ maxAge: 5 * 60 * 1000 });
+      if (fallback?.coords && isPhilippinesCoordinates(fallback.coords)) {
+        setLocation({
+          latitude: fallback.coords.latitude,
+          longitude: fallback.coords.longitude,
+          accuracy_m: fallback.coords.accuracy,
+        });
+        const accuracy = fallback.coords.accuracy ? ` (about ${Math.round(fallback.coords.accuracy)} m accuracy)` : '';
+        setLocationMessage(`You are at ${fallback.coords.latitude.toFixed(5)}, ${fallback.coords.longitude.toFixed(5)}${accuracy}.`);
       } else {
-        setLocation({ latitude: UCLM_COORDINATES.latitude, longitude: UCLM_COORDINATES.longitude });
-        setLocationMessage('Location centered on Opao, Mandaue City.');
+        setLocation(null);
+        setLocationMessage('Current position is unavailable. The map is centered on Opao, Mandaue City—tap Location to retry.');
       }
       logEvent('info', 'nearby_ranking_enabled');
     } catch (caught) {
       const message = getErrorMessage(caught, 'Could not get your location.');
       setLocationMessage(message);
-      logEvent('error', 'location_request_failed', { message });
+      // A disabled GPS provider is a recoverable user state, not a red-screen application error.
+      logEvent('warn', 'location_request_failed', { message });
     } finally {
       setLocationLoading(false);
     }
@@ -226,21 +301,31 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
     void AsyncStorage.removeItem(COMPARE_CACHE_KEY);
   }, []);
 
+  const allRankedDorms = useMemo(
+    () => rankDorms(dorms, filters, location, preferences),
+    [dorms, filters, location, preferences],
+  );
   const rankedDorms = useMemo(
-    () => filterAndRankDorms(dorms, filters, location),
-    [dorms, filters, location],
+    () => filterAndRankDorms(dorms, filters, location, preferences),
+    [dorms, filters, location, preferences],
   );
   const nearbyDorms = useMemo(
-    () => rankDorms(dorms.filter((dorm) => dorm.availability_status === 'available'), filters, location),
-    [dorms, filters, location],
+    () => rankDorms(
+      dorms.filter((dorm) => dorm.availability_status === 'available'),
+      filters,
+      location,
+      preferences,
+    ),
+    [dorms, filters, location, preferences],
   );
   const comparedDorms = useMemo(
-    () => compareIds.map((id) => dorms.find((dorm) => dorm.dorm_id === id)).filter(Boolean) as Dorm[],
-    [compareIds, dorms],
+    () => compareIds.map((id) => allRankedDorms.find((dorm) => dorm.dorm_id === id)).filter(Boolean) as Dorm[],
+    [allRankedDorms, compareIds],
   );
 
   const value: DiscoveryValue = {
     dorms,
+    allRankedDorms,
     rankedDorms,
     nearbyDorms,
     filters,
@@ -255,6 +340,9 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
     location,
     locationLoading,
     locationMessage,
+    preferences,
+    hasPreferences: hasDormPreferences(preferences),
+    refreshPreferences,
     requestLocation,
     compareIds,
     comparedDorms,

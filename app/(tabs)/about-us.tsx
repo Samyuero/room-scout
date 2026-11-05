@@ -1,3 +1,4 @@
+import { showError } from '@/components/error-toast';
 import { useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, Linking, Pressable, Modal, TextInput, Alert, ActivityIndicator } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -55,7 +56,7 @@ export default function AboutUs() {
       Alert.alert('Report sent', 'Thank you. The SNAP team can now review your report in the admin panel.');
     } catch (error) {
       console.error('Support ticket submission failed:', error);
-      Alert.alert('Could not send report', 'Please check your connection and try again.');
+      showError('Could not send report', 'Please check your connection and try again.');
     } finally {
       setSubmitting(false);
     }
@@ -127,7 +128,7 @@ export default function AboutUs() {
               onChangeText={setSubject}
               maxLength={120}
               placeholder="Short subject"
-              placeholderTextColor={AppColors.textMuted}
+              placeholderTextColor={AppColors.placeholder}
               style={styles.input}
             />
             <TextInput
@@ -137,7 +138,7 @@ export default function AboutUs() {
               multiline
               textAlignVertical="top"
               placeholder="What happened? Include steps to reproduce it if you can."
-              placeholderTextColor={AppColors.textMuted}
+              placeholderTextColor={AppColors.placeholder}
               style={[styles.input, styles.descriptionInput]}
             />
             <View style={styles.modalActions}>

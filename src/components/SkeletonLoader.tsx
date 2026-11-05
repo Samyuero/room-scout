@@ -1,4 +1,4 @@
-import { View, Text, StyleSheet, Animated } from 'react-native';
+import { View, StyleSheet } from 'react-native';
 
 interface Props {
   width?: number | string;

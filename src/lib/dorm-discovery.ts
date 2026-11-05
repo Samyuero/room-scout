@@ -3,6 +3,7 @@ import {
   type Dorm,
   type DormAvailability,
   type DormFilters,
+  type DormPreferences,
   type UserCoordinates,
 } from '@/types/dorm';
 
@@ -126,25 +127,57 @@ export function matchesDormFilters(dorm: Dorm, filters: DormFilters, location: U
   return true;
 }
 
-function getPreferenceScore(dorm: Dorm, filters: DormFilters) {
-  const checks = [
-    !filters.lguCertified || Boolean(dorm.lgu_certified),
-    !filters.petFriendly || Boolean(dorm.pet_friendly),
-    !filters.genderPolicy || dorm.gender_policy?.toLowerCase() === filters.genderPolicy.toLowerCase(),
-    filters.parking.length === 0 ||
-      filters.parking.some((item) => dorm.parking_info?.toLowerCase().includes(item.toLowerCase())),
-  ];
-  const requested = [filters.lguCertified, filters.petFriendly, Boolean(filters.genderPolicy), filters.parking.length > 0]
-    .filter(Boolean).length;
-  if (requested === 0) return 0.5;
-  const matched = checks.filter((value, index) => value && [filters.lguCertified, filters.petFriendly, Boolean(filters.genderPolicy), filters.parking.length > 0][index]).length;
-  return matched / requested;
+export function hasDormPreferences(preferences: DormPreferences | null | undefined) {
+  if (!preferences) return false;
+  return Boolean(
+    preferences.budget_min ||
+    preferences.budget_max ||
+    preferences.preferred_location?.trim() ||
+    preferences.parking?.trim() ||
+    preferences.pet_friendly || preferences.amenities?.length || preferences.utilities?.length || preferences.house_rules?.length || preferences.gender_policy || preferences.curfew || preferences.room_type || preferences.lgu_certified || preferences.furnished,
+  );
+}
+
+function getPreferenceScore(dorm: Dorm, preferences: DormPreferences | null) {
+  if (!hasDormPreferences(preferences) || !preferences) return 0.5;
+
+  const checks: boolean[] = [];
+  if (preferences.amenities?.length) checks.push(includesEvery(dorm.amenities, preferences.amenities));
+  if (preferences.utilities?.length) checks.push(includesEvery(dorm.utilities, preferences.utilities));
+  if (preferences.house_rules?.length) checks.push(includesEvery(dorm.house_rules || [], preferences.house_rules));
+  if (preferences.gender_policy) checks.push(dorm.gender_policy === preferences.gender_policy);
+  if (preferences.room_type) checks.push(dorm.room_type === preferences.room_type);
+  if (preferences.curfew) checks.push(preferences.curfew === 'No curfew' ? !dorm.curfew : Boolean(dorm.curfew));
+  if (preferences.lgu_certified) checks.push(Boolean(dorm.lgu_certified));
+  if (preferences.furnished) checks.push(Boolean(dorm.furnished));
+  const minBudget = Number(preferences.budget_min) || 0;
+  const maxBudget = Number(preferences.budget_max) || 0;
+  if (minBudget || maxBudget) {
+    checks.push((!minBudget || dorm.price >= minBudget) && (!maxBudget || dorm.price <= maxBudget));
+  }
+  if (preferences.pet_friendly) checks.push(Boolean(dorm.pet_friendly));
+  if (preferences.parking?.trim()) {
+    checks.push(Boolean(dorm.parking_info?.toLowerCase().includes(preferences.parking.toLowerCase())));
+  }
+  if (
+    preferences.preferred_location?.trim() &&
+    Number.isFinite(Number(preferences.latitude)) &&
+    Number.isFinite(Number(preferences.longitude))
+  ) {
+    const distance = getDistanceKm(
+      { latitude: Number(preferences.latitude), longitude: Number(preferences.longitude) },
+      dorm,
+    );
+    checks.push(distance <= Math.max(0.1, Number(preferences.radius_km) || 5));
+  }
+  return checks.length ? checks.filter(Boolean).length / checks.length : 0.5;
 }
 
 export function rankDorms(
   dorms: Dorm[],
   filters: DormFilters = DEFAULT_DORM_FILTERS,
   location: UserCoordinates | null = null,
+  preferences: DormPreferences | null = null,
 ) {
   return dorms
     .map((dorm) => {
@@ -159,8 +192,8 @@ export function rankDorms(
         ratingQuality +
         ratingConfidence +
         distanceScore +
-        getPreferenceScore(dorm, filters) * 10 +
-    (dorm.available_slots > 0 ? 5 : 0) +
+        getPreferenceScore(dorm, preferences) * 10 +
+        (dorm.available_slots > 0 ? 5 : 0) +
         (dorm.is_featured ? 2 : 0);
 
       return {
@@ -176,8 +209,18 @@ export function rankDorms(
     );
 }
 
-export function filterAndRankDorms(dorms: Dorm[], filters: DormFilters, location: UserCoordinates | null) {
-  return rankDorms(dorms.filter((dorm) => matchesDormFilters(dorm, filters, location)), filters, location);
+export function filterAndRankDorms(
+  dorms: Dorm[],
+  filters: DormFilters,
+  location: UserCoordinates | null,
+  preferences: DormPreferences | null = null,
+) {
+  return rankDorms(
+    dorms.filter((dorm) => matchesDormFilters(dorm, filters, location)),
+    filters,
+    location,
+    preferences,
+  );
 }
 
 export function formatPeso(value: number) {
@@ -238,4 +281,3 @@ export function getDemandPrediction(dorm: Dorm): DemandPredictionResult {
     color: '#34D399',
   };
 }
-

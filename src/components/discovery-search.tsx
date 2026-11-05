@@ -27,7 +27,7 @@ export function DiscoverySearchBar({ onPress, onFilterPress, value, placeholder 
         onPress={(event) => { event.stopPropagation(); onFilterPress(); }}
         style={styles.filterInside}
       >
-        <Ionicons name="options-outline" size={20} color={AppColors.accent} />
+        <Ionicons name="options-outline" size={23} color={AppColors.text} />
       </Pressable>
     </Pressable>
   );
@@ -123,12 +123,12 @@ export function DiscoverySearchSheet({ visible, onClose, onApplied, openFiltersI
               onChangeText={setQuery}
               onSubmitEditing={() => apply()}
               placeholder="Dorm, barangay, landmark, amenity"
-              placeholderTextColor={AppColors.textMuted}
+              placeholderTextColor={AppColors.placeholder}
               returnKeyType="search"
               style={styles.input}
             />
             <Pressable accessibilityLabel="Open filters" onPress={() => setFiltersVisible(true)} style={styles.inputFilter}>
-              <Ionicons name="options-outline" size={20} color={AppColors.accent} />
+              <Ionicons name="options-outline" size={23} color={AppColors.text} />
             </Pressable>
           </View>
         </View>
@@ -177,13 +177,13 @@ const styles = StyleSheet.create({
   searchBar: { height: 52, flexDirection: 'row', alignItems: 'center', gap: 9, paddingLeft: 15, paddingRight: 6, borderRadius: 18, borderCurve: 'continuous', backgroundColor: AppColors.surface, borderWidth: 1, borderColor: AppColors.border, boxShadow: '0 8px 22px rgba(0,0,0,0.18)' },
   searchBarText: { flex: 1, color: AppColors.text, fontSize: 14, fontWeight: '600' },
   placeholder: { color: AppColors.textMuted, fontWeight: '500' },
-  filterInside: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: AppColors.accentMuted },
+  filterInside: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent' },
   sheetPage: { flex: 1, backgroundColor: AppColors.background },
   sheetHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, paddingTop: 16, paddingBottom: 12 },
   roundButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: AppColors.surface },
   inputShell: { flex: 1, height: 52, flexDirection: 'row', alignItems: 'center', gap: 8, paddingLeft: 14, paddingRight: 5, borderRadius: 18, backgroundColor: AppColors.surface, borderWidth: 1, borderColor: AppColors.border },
   input: { flex: 1, height: 50, color: AppColors.text, fontSize: 14 },
-  inputFilter: { width: 42, height: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 14, backgroundColor: AppColors.accentMuted },
+  inputFilter: { width: 42, height: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 14, backgroundColor: 'transparent' },
   sheetContent: { padding: 16, paddingBottom: 110, gap: 18 },
   nearMeCard: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, borderRadius: 20, borderCurve: 'continuous', backgroundColor: AppColors.surface, borderWidth: 1, borderColor: AppColors.border },
   nearMeIcon: { width: 42, height: 42, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: AppColors.accent },

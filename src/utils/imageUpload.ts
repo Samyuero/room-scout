@@ -1,4 +1,5 @@
 import { supabase } from '@/lib/supabase';
+import { File } from 'expo-file-system';
 import * as FileSystem from 'expo-file-system/legacy';
 
 const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
@@ -12,12 +13,35 @@ function imageTypeFromPath(path: string) {
   return '';
 }
 
+export function getSafeImageExtension(path: string, mimeType?: string) {
+  const type = mimeType?.toLowerCase().split(';')[0];
+  if (type === 'image/png') return 'png';
+  if (type === 'image/webp') return 'webp';
+  if (type === 'image/jpeg') return 'jpg';
+  const extension = path.split('?')[0].split('.').pop()?.toLowerCase();
+  if (extension === 'png' || extension === 'webp') return extension;
+  if (extension === 'jpg' || extension === 'jpeg') return 'jpg';
+  return 'jpg';
+}
+
 function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binaryString = globalThis.atob ? globalThis.atob(base64) : '';
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const clean = base64.replace(/[^A-Za-z0-9+/=]/g, '');
+  const outputLength = Math.max(0, Math.floor((clean.length * 3) / 4) - (clean.endsWith('==') ? 2 : clean.endsWith('=') ? 1 : 0));
+  const bytes = new Uint8Array(outputLength);
+  let buffer = 0;
+  let bits = 0;
+  let output = 0;
+  for (const character of clean) {
+    if (character === '=') break;
+    const value = alphabet.indexOf(character);
+    if (value < 0) continue;
+    buffer = (buffer << 6) | value;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      if (output < bytes.length) bytes[output++] = (buffer >> bits) & 0xff;
+    }
   }
   return bytes.buffer;
 }
@@ -26,9 +50,19 @@ async function readImageUpload(uri: string, suppliedType?: string) {
   let bytes: ArrayBuffer | null = null;
   let contentType = (suppliedType || imageTypeFromPath(uri) || 'image/jpeg').toLowerCase().split(';')[0];
 
-  // 1. Try FileSystem Legacy (Most reliable for React Native file:// and content:// URIs on Android/iOS)
+  // 1. Expo File supports the temporary file:// assets returned by ImagePicker without network fetches.
   try {
-    if (uri.startsWith('file:') || uri.startsWith('content:') || uri.startsWith('ph:')) {
+    const file = new File(uri);
+    const fileType = file.type?.toLowerCase().split(';')[0];
+    if (fileType) contentType = fileType;
+    bytes = await file.arrayBuffer();
+  } catch {
+    // Some Android providers return content:// URIs; the legacy reader handles those below.
+  }
+
+  // 2. Android content-provider fallback.
+  try {
+    if (!bytes && (uri.startsWith('file:') || uri.startsWith('content:') || uri.startsWith('ph:'))) {
       const base64 = await FileSystem.readAsStringAsync(uri, {
         encoding: FileSystem.EncodingType.Base64,
       });
@@ -36,23 +70,24 @@ async function readImageUpload(uri: string, suppliedType?: string) {
         bytes = base64ToArrayBuffer(base64);
       }
     }
-  } catch (fsErr) {
-    console.warn('FileSystem read failed, trying fetch fallback:', fsErr);
+  } catch {
+    // Continue to browser/network-compatible fallbacks.
   }
 
-  // 2. Fallback to fetch() (For web, blob:, data:, and http URIs)
+  // 3. Browser-compatible fallback for blob:, data:, and http(s): URIs.
   if (!bytes) {
     try {
       const response = await fetch(uri);
       const resType = response.headers?.get('content-type');
       if (resType) contentType = resType.toLowerCase().split(';')[0];
+      if (!response.ok) throw new Error(`Image read returned HTTP ${response.status}.`);
       bytes = await response.arrayBuffer();
-    } catch (fetchErr) {
-      console.warn('Fetch read failed, trying XHR fallback:', fetchErr);
+    } catch {
+      // Continue to XMLHttpRequest fallback.
     }
   }
 
-  // 3. Fallback to XMLHttpRequest
+  // 4. Last-resort React Native URI reader.
   if (!bytes) {
     try {
       bytes = await new Promise<ArrayBuffer>((resolve, reject) => {
@@ -69,8 +104,8 @@ async function readImageUpload(uri: string, suppliedType?: string) {
         xhr.open('GET', uri, true);
         xhr.send(null);
       });
-    } catch (xhrErr) {
-      console.warn('XHR read failed:', xhrErr);
+    } catch {
+      // The single user-facing error below includes the actionable recovery.
     }
   }
 
@@ -78,17 +113,15 @@ async function readImageUpload(uri: string, suppliedType?: string) {
     throw new Error('The selected image could not be read or is empty.');
   }
 
-  // Supabase Storage buckets by default allow image/jpeg and image/png. Map webp / unknown to image/jpeg for bucket safety.
-  let uploadContentType = contentType;
-  if (!ALLOWED_IMAGE_TYPES.has(uploadContentType) || uploadContentType === 'image/webp') {
-    uploadContentType = 'image/jpeg';
+  if (!ALLOWED_IMAGE_TYPES.has(contentType)) {
+    throw new Error('Only JPEG, PNG, and WebP images can be uploaded.');
   }
 
   if (bytes.byteLength > MAX_IMAGE_BYTES) {
     throw new Error('Images must be 8 MB or smaller.');
   }
 
-  return { bytes, contentType: uploadContentType };
+  return { bytes, contentType };
 }
 
 /**
@@ -106,7 +139,7 @@ export const uploadImage = async (filePath: string, uri: string, mimeType?: stri
       .upload(filePath, bytes, {
         contentType,
         cacheControl: '3600',
-        upsert: true,
+        upsert: false,
       });
 
     if (error) throw error;
@@ -118,7 +151,6 @@ export const uploadImage = async (filePath: string, uri: string, mimeType?: stri
 
     return publicUrl;
   } catch (error) {
-    console.error('Error uploading image:', error);
     throw error;
   }
 };
@@ -140,39 +172,20 @@ export const deleteImage = async (filePath: string): Promise<void> => {
   }
 };
 
-/** Uploads sensitive images to a private bucket and returns the protected object path. Fallback to uploaded_images if private_documents bucket is missing. */
+/** Uploads sensitive images to a private bucket and returns the protected object path. */
 export const uploadPrivateImage = async (filePath: string, uri: string): Promise<string> => {
   const { bytes, contentType } = await readImageUpload(uri);
-  try {
-    const { data, error } = await supabase.storage
-      .from('private_documents')
-      .upload(filePath, bytes, { contentType, cacheControl: '3600', upsert: true });
+  const { data, error } = await supabase.storage
+    .from('private_documents')
+    .upload(filePath, bytes, { contentType, cacheControl: '3600', upsert: false });
 
-    if (error) {
-      if (error.message?.includes('Bucket not found') || (error as any)?.statusCode === '404' || (error as any)?.status === 404) {
-        console.warn('private_documents bucket not found, falling back to uploaded_images');
-        const fallbackPath = `proofs/${filePath}`;
-        const { data: fbData, error: fbError } = await supabase.storage
-          .from('uploaded_images')
-          .upload(fallbackPath, bytes, { contentType, cacheControl: '3600', upsert: true });
-        if (fbError) throw fbError;
-        return fbData.path;
-      }
-      throw error;
+  if (error) {
+    if (error.message?.includes('Bucket not found') || (error as any)?.statusCode === '404' || (error as any)?.status === 404) {
+      throw new Error('Secure document storage is not configured. Ask an administrator to apply the Supabase runtime update.');
     }
-    return data.path;
-  } catch (err: any) {
-    if (err?.message?.includes('Bucket not found')) {
-      console.warn('Bucket not found error caught, using uploaded_images fallback');
-      const fallbackPath = `proofs/${filePath}`;
-      const { data: fbData, error: fbError } = await supabase.storage
-        .from('uploaded_images')
-        .upload(fallbackPath, bytes, { contentType, cacheControl: '3600', upsert: true });
-      if (fbError) throw fbError;
-      return fbData.path;
-    }
-    throw err;
+    throw error;
   }
+  return data.path;
 };
 
 export const getPrivateDocumentUrl = async (path: string): Promise<string> => {
@@ -186,8 +199,5 @@ export const getPrivateDocumentUrl = async (path: string): Promise<string> => {
     console.warn('Failed to get signed URL from private_documents:', err);
   }
 
-  // Fallback to uploaded_images
-  const { data: publicData } = supabase.storage.from('uploaded_images').getPublicUrl(path);
-  return publicData?.publicUrl || path;
+  return '';
 };
-
