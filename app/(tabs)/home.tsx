@@ -8,19 +8,21 @@ import { DormResultCard } from '@/components/dorm-result-card';
 import { AppColors, BorderRadius } from '@/constants/theme';
 import { useDiscovery } from '@/context/discovery-context';
 import type { Dorm } from '@/types/dorm';
+import { canShowFeaturedDorm } from '@/lib/featured-listings';
 
 export default function Home() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { allRankedDorms, loading, refreshing, refresh, error, isUsingCachedData, location, locationLoading, locationMessage, requestLocation, compareIds, toggleCompare, hasPreferences } = useDiscovery();
+  const { allRankedDorms, loading, refreshing, refresh, error, isUsingCachedData, compareIds, toggleCompare, hasPreferences } = useDiscovery();
   const results = allRankedDorms.slice(0, 30);
+  const featured = allRankedDorms.filter(canShowFeaturedDorm);
 
   function compare(dorm: Dorm) {
     if (toggleCompare(dorm.dorm_id) === 'limit') Alert.alert('Comparison full', 'Remove one dorm before adding another.');
   }
 
   if (loading && results.length === 0) {
-    return <View style={styles.centered}><Image source={require('../../assets/logo.png')} contentFit="contain" style={styles.loadingLogo} /><ActivityIndicator color={AppColors.accent} size="large" /><Text style={styles.loadingTitle}>Preparing nearby dorms</Text><Text style={styles.helper}>Ratings, availability and maps are loading.</Text></View>;
+    return <View style={styles.centered}><Image source={require('../../assets/logo.png')} contentFit="contain" style={styles.loadingLogo} /><ActivityIndicator color={AppColors.accent} size="large" /><Text style={styles.loadingTitle}>Preparing your dorms</Text><Text style={styles.helper}>Ratings, availability and maps are loading.</Text></View>;
   }
 
   return (
@@ -39,11 +41,15 @@ export default function Home() {
 
 
         <View style={styles.body}>
-          <Pressable disabled={locationLoading} onPress={requestLocation} style={styles.locationCard}>
-            <View style={styles.locationIcon}><Ionicons name={location ? 'navigate' : 'navigate-outline'} size={19} color={AppColors.white} /></View>
-            <View style={{ flex: 1 }}><Text style={styles.locationTitle}>{location ? 'Dorms near me' : 'Show dorms near me'}</Text><Text style={styles.helper}>{locationMessage || 'Location stays on this device and is used for distance ranking.'}</Text></View>
-            <Ionicons name="chevron-forward" size={18} color={AppColors.textMuted} />
-          </Pressable>
+          {featured.length > 0 && <View style={styles.featuredSection}>
+            <Text style={styles.sectionTitle}>Featured dormitories</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.featuredRow}>
+              {featured.map((dorm) => <Pressable key={dorm.dorm_id} accessibilityLabel={`View featured dorm ${dorm.name}`} onPress={() => router.push(`/(tabs)/${dorm.dorm_id}` as never)} style={({ pressed }) => [styles.featuredItem, { opacity: pressed ? 0.7 : 1 }]}>
+                {dorm.images[0] ? <Image source={{ uri: dorm.images[0] }} contentFit="cover" style={styles.featuredPhoto} /> : <View style={[styles.featuredPhoto,styles.featuredPlaceholder]}><Ionicons name="home-outline" size={28} color={AppColors.accent} /></View>}
+                <Text numberOfLines={2} style={styles.featuredName}>{dorm.name}</Text>
+              </Pressable>)}
+            </ScrollView>
+          </View>}
           {isUsingCachedData && <Text style={styles.cacheText}>Saved listings are visible while live availability refreshes.</Text>}
           <ErrorNotice message={error} />
 
@@ -60,8 +66,8 @@ export default function Home() {
           {results.length === 0 && (
             <View style={styles.empty}>
               <Ionicons name="home-outline" size={34} color={AppColors.textMuted} />
-              <Text style={styles.sectionTitle}>No approved dormitories yet</Text>
-              <Text style={styles.helper}>Owner submissions appear here after an administrator reviews and approves them.</Text>
+              <Text style={styles.sectionTitle}>No dormitories yet</Text>
+              <Text style={styles.helper}>New listings will appear here. Pull down to check again.</Text>
             </View>
           )}
         </View>
@@ -91,5 +97,11 @@ const styles = StyleSheet.create({
   errorText: { color: AppColors.error, fontSize: 11 },
   sectionHeader: { paddingTop: 7, paddingBottom: 1 },
   sectionTitle: { color: AppColors.text, fontSize: 18, fontWeight: '800' },
+  featuredSection: { gap: 12, paddingBottom: 8 },
+  featuredRow: { gap: 16, paddingBottom: 4 },
+  featuredItem: { width: 88, alignItems: 'center', gap: 8 },
+  featuredPhoto: { width: 80, height: 80, borderRadius: BorderRadius.full },
+  featuredPlaceholder: { alignItems: 'center', justifyContent: 'center', backgroundColor: AppColors.surfaceElevated },
+  featuredName: { color: AppColors.text, fontSize: 12, fontWeight: '600', textAlign: 'center', lineHeight: 17 },
   empty: { alignItems: 'center', gap: 8, padding: 38, borderRadius: BorderRadius.lg, backgroundColor: AppColors.surface },
 });

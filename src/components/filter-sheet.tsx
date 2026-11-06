@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { AppColors, BorderRadius } from '@/constants/theme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DormFilters } from '@/types/dorm';
 
 interface Props {
@@ -31,6 +32,7 @@ function Chip({ label, selected, onPress }: { label: string; selected: boolean; 
 
 export function FilterSheet({ visible, filters, onApply, onClose }: Props) {
   const [draft, setDraft] = useState(filters);
+  const insets = useSafeAreaInsets();
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose} onShow={() => setDraft(filters)}>
@@ -67,14 +69,18 @@ export function FilterSheet({ visible, filters, onApply, onClose }: Props) {
               />
             </View>
 
-            <Text style={styles.label}>Within {draft.radiusKm} km</Text>
+            <Text style={styles.label}>Distance</Text>
+            <View style={styles.chips}>
+              <Chip label="Any distance" selected={draft.radiusEnabled === false} onPress={() => setDraft({ ...draft, radiusEnabled: false })} />
+              <Chip label={`Within ${draft.radiusKm} km`} selected={draft.radiusEnabled !== false} onPress={() => setDraft({ ...draft, radiusEnabled: true })} />
+            </View>
             <View style={styles.chips}>
               {[1, 2, 3, 5, 8].map((radius) => (
-                <Chip key={radius} label={`${radius} km`} selected={draft.radiusKm === radius} onPress={() => setDraft({ ...draft, radiusKm: radius })} />
+                <Chip key={radius} label={`${radius} km`} selected={draft.radiusEnabled !== false && draft.radiusKm === radius} onPress={() => setDraft({ ...draft, radiusKm: radius, radiusEnabled: true })} />
               ))}
             </View>
 
-            <TextInput placeholderTextColor={AppColors.placeholder} accessibilityLabel="Custom search radius in kilometers" keyboardType="decimal-pad" style={styles.input} value={String(draft.radiusKm)} onChangeText={(value) => { const radiusKm = Number(value); if (Number.isFinite(radiusKm) && radiusKm > 0 && radiusKm <= 20000) setDraft({ ...draft, radiusKm }); }} />
+            <TextInput placeholderTextColor={AppColors.placeholder} accessibilityLabel="Custom search radius in kilometers" keyboardType="decimal-pad" style={styles.input} value={String(draft.radiusKm)} onChangeText={(value) => { const radiusKm = Number(value); if (Number.isFinite(radiusKm) && radiusKm > 0 && radiusKm <= 20000) setDraft({ ...draft, radiusKm, radiusEnabled: true }); }} />
             <Text style={styles.label}>Gender policy</Text>
             <View style={styles.chips}>
               {[
@@ -124,10 +130,10 @@ export function FilterSheet({ visible, filters, onApply, onClose }: Props) {
             ))}
           </ScrollView>
 
-          <View style={styles.actions}>
+          <View style={[styles.actions, { paddingBottom: Math.max(16, insets.bottom) }]}>
             <Pressable
               style={styles.resetButton}
-              onPress={() => setDraft({ ...filters, minPrice: null, maxPrice: null, genderPolicy: '', amenities: [], utilities: [], parking: [], parkingRequired: false, roomTypes: [], curfewPolicy: '', lguCertified: false, petFriendly: false, onlyAvailable: true })}
+              onPress={() => setDraft({ ...filters, minPrice: null, maxPrice: null, genderPolicy: '', amenities: [], utilities: [], parking: [], parkingRequired: false, roomTypes: [], curfewPolicy: '', lguCertified: false, petFriendly: false, onlyAvailable: true, radiusEnabled: false })}
             >
               <Text style={styles.resetText}>Clear</Text>
             </Pressable>

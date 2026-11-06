@@ -52,6 +52,12 @@ export interface UserCoordinates {
   accuracy_m?: number | null;
 }
 
+/** A chosen school/place is a search anchor, never a claim about the device's GPS position. */
+export interface SearchOrigin extends UserCoordinates {
+  label: string;
+  kind: 'school' | 'place';
+}
+
 /** Private preferences belonging only to the signed-in renter. */
 export interface DormPreferences {
   amenities?: string[];
@@ -86,6 +92,7 @@ export interface DormFilters {
   roomTypes: string[];
   curfewPolicy: '' | 'with-curfew' | 'no-curfew';
   radiusKm: number;
+  radiusEnabled?: boolean;
   onlyAvailable: boolean;
 }
 
@@ -103,5 +110,6 @@ export const DEFAULT_DORM_FILTERS: DormFilters = {
   roomTypes: [],
   curfewPolicy: '',
   radiusKm: 5,
+  radiusEnabled: false,
   onlyAvailable: true,
 };

@@ -2,7 +2,7 @@ import { AppColors } from '@/constants/theme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { showError } from '@/components/error-toast';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, Pressable, ActivityIndicator, Alert, Image, ScrollView } from 'react-native';
 import { useRouter } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
@@ -16,6 +16,16 @@ export default function OwnerVerification() {
   const insets = useSafeAreaInsets();
   const [imageUri, setImageUri] = useState('');
   const [loading, setLoading] = useState(false);
+  const [previous, setPrevious] = useState<{ status: string; admin_notes?: string } | null>(null);
+  useEffect(() => {
+    if (!user) return;
+    let active = true;
+    void supabase.from('owner_verifications').select('status,admin_notes').eq('user_id', user.id).maybeSingle().then(({ data, error }) => {
+      if (active && !error) setPrevious(data);
+      if (active && error) showError('Verification status unavailable', 'Please retry before submitting.');
+    });
+    return () => { active = false; };
+  }, [user]);
 
   const pickDocumentImage = async () => {
     try {
@@ -55,11 +65,7 @@ export default function OwnerVerification() {
       const fileName = `${user.id}/verifications/${Date.now()}.${fileExt}`;
       const protectedPath = await uploadPrivateImage(fileName, imageUri);
 
-      const { error } = await supabase.from('owner_verifications').insert({
-        user_id: user.id,
-        document_url: protectedPath,
-        status: 'pending',
-      });
+      const { error } = await supabase.rpc('submit_owner_verification', { p_document_path: protectedPath });
 
       if (error) throw error;
 
@@ -86,6 +92,7 @@ export default function OwnerVerification() {
       <Text style={styles.subtitle}>
         To list your dormitories, we need to verify your identity. Please select a clear photo of your valid government ID or business permit from your gallery.
       </Text>
+      {previous && <View style={styles.statusNotice}><Text style={styles.statusText}>{previous.status === 'approved' ? 'Your owner account is verified.' : previous.status === 'pending' ? 'Your verification is waiting for administrator review.' : 'Your previous submission was declined. Select a corrected document to resubmit.'}</Text>{previous.admin_notes ? <Text style={styles.statusText}>{previous.admin_notes}</Text> : null}</View>}
 
       <View style={styles.inputGroup}>
         <Text style={styles.label}>Verification Document Photo</Text>
@@ -111,7 +118,7 @@ export default function OwnerVerification() {
           (loading || !imageUri) && styles.submitButtonDisabled,
         ]}
         onPress={handleSubmit}
-        disabled={loading || !imageUri}
+        disabled={loading || !imageUri || previous?.status === 'approved' || previous?.status === 'pending'}
       >
         {loading ? (
           <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
@@ -135,6 +142,8 @@ export default function OwnerVerification() {
 }
 
 const styles = StyleSheet.create({
+  statusNotice: { padding: 16, gap: 8, marginBottom: 20, backgroundColor: AppColors.surfaceElevated, borderRadius: 10 },
+  statusText: { color: AppColors.textSecondary, fontSize: 14, lineHeight: 21 },
   container: {
     flexGrow: 1,
     padding: 24,

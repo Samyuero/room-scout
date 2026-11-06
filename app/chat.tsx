@@ -8,7 +8,8 @@ import { useDiscovery } from '@/context/discovery-context';
 import { findDormsFromPrompt } from '@/lib/dorm-assistant';
 import { formatPeso } from '@/lib/dorm-discovery';
 import type { Dorm } from '@/types/dorm';
-import { askGeminiAssistant, AssistantRateLimitError } from '@/lib/gemini-assistant';
+import { askGeminiAssistant, getAssistantQuotaWarning } from '@/lib/gemini-assistant';
+import { showWarning } from '@/components/error-toast';
 
 interface Message {
   id: string;
@@ -62,9 +63,9 @@ export default function Chat() {
         matches: matches.length ? matches : localResult.matches,
       }]);
     } catch (caught) {
-      const fallbackIntro = caught instanceof AssistantRateLimitError
-        ? 'The online assistant is taking a short break to protect the project’s free quota, so I used RoomScout’s built-in matcher instead.'
-        : 'I could not reach the online assistant, so I used RoomScout’s built-in matcher instead.';
+      const quotaWarning = getAssistantQuotaWarning(caught);
+      if (quotaWarning) showWarning('SNAP limit reached', quotaWarning);
+      const fallbackIntro = 'Here’s what I found using SNAP’s built-in matcher.';
       setMessages((current) => [...current, {
         id: `assistant-${messageId}`,
         role: 'assistant',

@@ -34,7 +34,7 @@ function getAvailability(row: Record<string, any>): DormAvailability {
   const slots = maxTenants - occupied;
 
   if (row.available === false || slots <= 0) {
-    return 'unavailable';
+    return row.availability_status === 'reserved' ? 'reserved' : 'unavailable';
   }
   if (
     row.availability_status === 'available' ||
@@ -83,7 +83,7 @@ export function normalizeDorm(row: Record<string, any>): Dorm {
     occupied_tenants: occupiedTenants,
     available_slots: availableSlots,
     available: isAvailable,
-    availability_status: isAvailable ? getAvailability(row) : 'unavailable',
+    availability_status: getAvailability(row),
     rating_average: Math.round(ratingAverage * 10) / 10,
     rating_count: ratingCount,
     distance_km: null,
@@ -97,22 +97,39 @@ function includesEvery(source: string[], selected: string[]) {
   return selected.every((item) => normalized.some((value) => value.includes(clean(item))));
 }
 
-export function matchesDormFilters(dorm: Dorm, filters: DormFilters, location: UserCoordinates | null) {
-  const query = filters.query.trim().toLowerCase();
-  const searchable = [dorm.name, dorm.address, ...dorm.amenities, ...dorm.utilities]
-    .join(' ')
-    .toLowerCase();
+function hasCurfew(value?: string | null) {
+  return Boolean(value?.trim() && !/^(no curfew|none|24 hours|24\/7)$/i.test(value.trim()));
+}
 
-  if (query && !searchable.includes(query)) return false;
+function hasParking(value?: string | null) {
+  return Boolean(value?.trim() && !/^(none|no|not available|no parking)$/i.test(value.trim()));
+}
+
+function searchWords(value: string) {
+  return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/\bwi[\s-]*fi\b/g, 'wifi').match(/[a-z0-9]+/g) || [];
+}
+
+/** Prefixes match whole word starts: "Le" finds "Lebron", not the middle of "Electricity". */
+export function matchesDormQuery(dorm: Dorm, query: string) {
+  if (!query.trim()) return true;
+  const requested = searchWords(query);
+  if (requested.length === 0) return false;
+  const words = searchWords([dorm.name, dorm.address, ...dorm.amenities, ...dorm.utilities].join(' '));
+  return requested.every((term) => words.some((word) => word.startsWith(term)));
+}
+
+export function matchesDormFilters(dorm: Dorm, filters: DormFilters, location: UserCoordinates | null) {
+  if (!matchesDormQuery(dorm, filters.query)) return false;
   if (filters.minPrice !== null && dorm.price < filters.minPrice) return false;
   if (filters.maxPrice !== null && dorm.price > filters.maxPrice) return false;
   if (filters.genderPolicy && dorm.gender_policy?.toLowerCase() !== filters.genderPolicy.toLowerCase()) return false;
   if (filters.lguCertified && !dorm.lgu_certified) return false;
   if (filters.petFriendly && !dorm.pet_friendly) return false;
-  if (filters.parkingRequired && !dorm.parking_info) return false;
+  if (filters.parkingRequired && !hasParking(dorm.parking_info)) return false;
   if (filters.roomTypes.length > 0 && !filters.roomTypes.some((value) => dorm.room_type?.toLowerCase() === value.toLowerCase())) return false;
-  if (filters.curfewPolicy === 'with-curfew' && !dorm.curfew) return false;
-  if (filters.curfewPolicy === 'no-curfew' && dorm.curfew) return false;
+  if (filters.curfewPolicy === 'with-curfew' && !hasCurfew(dorm.curfew)) return false;
+  if (filters.curfewPolicy === 'no-curfew' && hasCurfew(dorm.curfew)) return false;
   if (filters.onlyAvailable && dorm.availability_status !== 'available') return false;
   if (!includesEvery(dorm.amenities, filters.amenities)) return false;
   if (!includesEvery(dorm.utilities, filters.utilities)) return false;
@@ -121,7 +138,9 @@ export function matchesDormFilters(dorm: Dorm, filters: DormFilters, location: U
     !filters.parking.some((value) => dorm.parking_info?.toLowerCase().includes(value.toLowerCase()))
   ) return false;
 
-  if (location && Number.isFinite(dorm.latitude) && Number.isFinite(dorm.longitude)) {
+  if (filters.radiusEnabled !== false && location) {
+    if (!Number.isFinite(dorm.latitude) || !Number.isFinite(dorm.longitude)) return false;
+    if (!Number.isFinite(filters.radiusKm) || filters.radiusKm <= 0) return false;
     if (getDistanceKm(location, dorm) > filters.radiusKm) return false;
   }
   return true;
@@ -138,7 +157,7 @@ export function hasDormPreferences(preferences: DormPreferences | null | undefin
   );
 }
 
-function getPreferenceScore(dorm: Dorm, preferences: DormPreferences | null) {
+export function getPreferenceScore(dorm: Dorm, preferences: DormPreferences | null) {
   if (!hasDormPreferences(preferences) || !preferences) return 0.5;
 
   const checks: boolean[] = [];
@@ -171,6 +190,52 @@ function getPreferenceScore(dorm: Dorm, preferences: DormPreferences | null) {
     checks.push(distance <= Math.max(0.1, Number(preferences.radius_km) || 5));
   }
   return checks.length ? checks.filter(Boolean).length / checks.length : 0.5;
+}
+
+/** Soft ranking is used only for the explicitly labelled alternatives, never Matches. */
+export function recommendDorms(
+  dorms: Dorm[], filters: DormFilters, location: UserCoordinates | null,
+  preferences: DormPreferences | null, matchedIds: ReadonlySet<string> = new Set(),
+) {
+  const score = (dorm: Dorm) => {
+    const checks: number[] = [];
+    const featureChecks = [
+      [filters.lguCertified, Boolean(dorm.lgu_certified)],
+      [filters.petFriendly, Boolean(dorm.pet_friendly)],
+      [filters.parkingRequired, hasParking(dorm.parking_info)],
+      [filters.onlyAvailable, dorm.availability_status === 'available'],
+    ];
+    featureChecks.forEach(([requested, matches]) => { if (requested) checks.push(matches ? 1 : 0); });
+    if (filters.query.trim()) {
+      const words = searchWords(filters.query);
+      checks.push(words.length ? words.filter((word) => matchesDormQuery(dorm, word)).length / words.length : 0);
+    }
+    if (filters.minPrice !== null || filters.maxPrice !== null) {
+      const lower = filters.minPrice ?? 0;
+      const upper = filters.maxPrice ?? Infinity;
+      const gap = dorm.price < lower ? lower - dorm.price : dorm.price > upper ? dorm.price - upper : 0;
+      checks.push(1 / (1 + gap / Math.max(Number.isFinite(upper) ? upper : lower, 1)));
+    }
+    if (filters.genderPolicy) checks.push(dorm.gender_policy?.toLowerCase() === filters.genderPolicy.toLowerCase() ? 1 : 0);
+    if (filters.roomTypes.length) checks.push(filters.roomTypes.some((type) => type.toLowerCase() === dorm.room_type?.toLowerCase()) ? 1 : 0);
+    if (filters.curfewPolicy) checks.push((filters.curfewPolicy === 'with-curfew') === hasCurfew(dorm.curfew) ? 1 : 0);
+    filters.amenities.forEach((item) => checks.push(includesEvery(dorm.amenities, [item]) ? 1 : 0));
+    filters.utilities.forEach((item) => checks.push(includesEvery(dorm.utilities, [item]) ? 1 : 0));
+    if (filters.parking.length) checks.push(filters.parking.some((item) => dorm.parking_info?.toLowerCase().includes(item.toLowerCase())) ? 1 : 0);
+    if (filters.radiusEnabled && location && Number.isFinite(dorm.latitude) && Number.isFinite(dorm.longitude)) {
+      checks.push(1 / (1 + getDistanceKm(location, dorm) / Math.max(filters.radiusKm, 0.1)));
+    }
+    const filterScore = checks.length ? checks.reduce((total, value) => total + value, 0) / checks.length : null;
+    const preferenceScore = hasDormPreferences(preferences) ? getPreferenceScore(dorm, preferences) : null;
+    // Bayesian rating keeps one five-star review from outranking an established property automatically.
+    const ratingScore = ((dorm.rating_average * dorm.rating_count + 3 * 5) / (dorm.rating_count + 5)) / 5;
+    if (filterScore === null && preferenceScore === null) return ratingScore;
+    return (filterScore ?? preferenceScore ?? 0) * 0.5 + (preferenceScore ?? filterScore ?? 0) * 0.35 + ratingScore * 0.15;
+  };
+  return rankDorms(dorms.filter((dorm) => !matchedIds.has(dorm.dorm_id)), filters, location, preferences)
+    .map((dorm) => ({ dorm, score: score(dorm) }))
+    .sort((a, b) => b.score - a.score || b.dorm.rating_count - a.dorm.rating_count || a.dorm.dorm_id.localeCompare(b.dorm.dorm_id))
+    .map(({ dorm }) => dorm);
 }
 
 export function rankDorms(

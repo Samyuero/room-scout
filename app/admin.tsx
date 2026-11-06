@@ -1,634 +1,151 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, FlatList, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Image } from 'expo-image';
+import { Ionicons } from '@expo/vector-icons';
+import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { AppColors, BorderRadius, Spacing } from '@/constants/theme';
+import { supabase } from '@/lib/supabase';
+import { useAuth } from '@/hooks/useAuth';
 import { showError } from '@/components/error-toast';
-import { useState, useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, FlatList, ActivityIndicator, Pressable, Alert, Switch, Linking, ScrollView } from 'react-native';
-import { supabase } from '../src/lib/supabase';
-import { useAuth } from '../src/hooks/useAuth';
-import { useRouter } from 'expo-router';
-import { getPrivateDocumentUrl } from '@/utils/imageUpload';
-import { AppColors, BorderRadius } from '@/constants/theme';
+import { logEvent } from '@/lib/logger';
+
+type Tab = 'verifications' | 'dorms' | 'payments' | 'support' | 'users';
+const tabs: { key: Tab; title: string; icon: keyof typeof Ionicons.glyphMap }[] = [
+  { key: 'verifications', title: 'Owner checks', icon: 'shield-checkmark-outline' },
+  { key: 'dorms', title: 'Listings', icon: 'home-outline' },
+  { key: 'payments', title: 'Payments', icon: 'receipt-outline' },
+  { key: 'support', title: 'Support', icon: 'chatbubbles-outline' },
+  { key: 'users', title: 'Accounts', icon: 'people-outline' },
+];
+let channelSequence = 0;
+const money = (value: unknown) => '₱' + Number(value || 0).toLocaleString('en-PH');
+const date = (value: string) => Number.isFinite(new Date(value).getTime()) ? new Date(value).toLocaleString() : 'Date unavailable';
 
 export default function AdminScreen() {
   const router = useRouter();
-  const { user } = useAuth();
-  
+  const insets = useSafeAreaInsets();
+  const { user, loading: authLoading } = useAuth();
+  const params = useLocalSearchParams<{ tab?: string; itemId?: string }>();
+  const [tab, setTab] = useState<Tab>('verifications');
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
-  const [loadingRole, setLoadingRole] = useState(true);
-  const [activeTab, setActiveTab] = useState<'verifications' | 'payments' | 'dorms' | 'support'>('verifications');
-  
-  const [certifications, setCertifications] = useState<any[]>([]);
-  const [pendingUsers, setPendingUsers] = useState<any[]>([]);
   const [dorms, setDorms] = useState<any[]>([]);
-  const [pendingPayments, setPendingPayments] = useState<any[]>([]);
-  const [supportTickets, setSupportTickets] = useState<any[]>([]);
+  const [verifications, setVerifications] = useState<any[]>([]);
+  const [certifications, setCertifications] = useState<any[]>([]);
+  const [payments, setPayments] = useState<any[]>([]);
+  const [tickets, setTickets] = useState<any[]>([]);
+  const [accounts, setAccounts] = useState<any[]>([]);
+  const [identityReviews, setIdentityReviews] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [actionLoading, setActionLoading] = useState<string | null>(null);
-
-  const checkAdminRole = useCallback(async () => {
-    if (!user) {
-      setIsAdmin(false);
-      setLoadingRole(false);
-      return;
-    }
-    try {
-      // Check if the user exists in the admins table
-      const { data, error } = await supabase
-        .from('admins')
-        .select('admin_id')
-        .eq('admin_id', user.id)
-        .maybeSingle();
-      
-      if (error) throw error;
-      setIsAdmin(!!data);
-    } catch (err) {
-      console.error('Error checking admin role:', err);
-      setIsAdmin(false);
-    } finally {
-      setLoadingRole(false);
-    }
-  }, [user]);
+  const [error, setError] = useState('');
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const version = useRef(0);
 
   useEffect(() => {
-    void checkAdminRole();
-  }, [checkAdminRole]);
-
-  const fetchData = useCallback(async () => {
-    if (isAdmin !== true) return;
-    setRefreshing(true);
+    if (tabs.some((item) => item.key === params.tab)) setTab(params.tab as Tab);
+    setExpandedId(params.itemId || null); setQuery(''); setFilter('all');
+  }, [params.tab, params.itemId]);
+  const load = useCallback(async () => {
+    if (!user) { setIsAdmin(false); setLoading(false); return; }
+    const current = ++version.current;
     try {
-      const [verificationResult, paymentResult, dormResult, supportResult, certificationResult] = await Promise.all([
-        supabase
-          .from('owner_verifications')
-          .select('*, owners(owner_id, full_name, username, avatar_url)')
-          .eq('status', 'pending')
-          .order('created_at', { ascending: false }),
-        supabase
-          .from('rental_requests')
-          .select('*, dorms:dorm_id(name, address), renters:user_id(full_name, username)')
-          .in('status', ['payment_submitted', 'cancelled'])
-          .eq('payment_status', 'pending_verification')
-          .order('updated_at', { ascending: true }),
-        supabase
-          .from('dorms')
-          .select('*')
-          .order('created_at', { ascending: false }),
-        supabase
-          .from('support_tickets')
-          .select('ticket_id, subject, description, status, created_at, updated_at')
-          .in('status', ['open', 'in_progress'])
-          .order('created_at', { ascending: false }),
-        supabase.from('lgu_certification_requests').select('*').eq('status', 'pending'),
+      const role = await supabase.from('admins').select('admin_id').eq('admin_id', user.id).maybeSingle();
+      if (role.error) throw role.error;
+      if (current !== version.current) return;
+      setIsAdmin(!!role.data);
+      if (!role.data) return;
+      // Fetch all queue counts before tabs are opened; keep successful data when one queue fails.
+      const results = await Promise.all([
+        supabase.from('owner_verifications').select('*, owners(full_name,username)').eq('status', 'pending').order('created_at', { ascending: false }),
+        supabase.from('dorms').select('*').order('created_at', { ascending: false }),
+        supabase.from('rental_requests').select('*, dorms:dorm_id(name,address), renters:user_id(full_name,username)').order('updated_at', { ascending: false }),
+        supabase.from('support_tickets').select('*').order('updated_at', { ascending: false }),
+        supabase.from('lgu_certification_requests').select('*').order('created_at', { ascending: false }),
+        supabase.rpc('admin_list_accounts'),
+        supabase.from('renter_verifications').select('user_id,status,reviewed_at'),
       ]);
-      const firstError = certificationResult.error || verificationResult.error || paymentResult.error || dormResult.error || supportResult.error;
-      if (firstError) throw firstError;
-      setCertifications(certificationResult.data || []);
-      setPendingUsers(verificationResult.data || []);
-      setPendingPayments(paymentResult.data || []);
-      setDorms(dormResult.data || []);
-      setSupportTickets(supportResult.data || []);
-    } catch (err: any) {
-      showError('Error Fetching Data', err.message);
-    } finally {
-      setRefreshing(false);
-    }
-  }, [isAdmin]);
-
-  useEffect(() => {
-    if (isAdmin === true) {
-      void fetchData();
-    }
-  }, [fetchData, isAdmin]);
-
+      if (current !== version.current) return;
+      const setters = [setVerifications, setDorms, setPayments, setTickets, setCertifications, setAccounts, setIdentityReviews];
+      results.forEach((result, index) => { if (!result.error) setters[index](result.data || []); });
+      const failure = results.find((result) => result.error)?.error;
+      setError(failure?.message || '');
+      if (failure) logEvent('warn', 'admin_dashboard_refresh_failed', { userId: user.id, code: failure.code });
+    } catch (caught: any) { if (current === version.current) setError(caught.message || 'Could not load the admin panel.'); }
+    finally { if (current === version.current) { setLoading(false); setRefreshing(false); } }
+  }, [user]);
+  useFocusEffect(useCallback(() => { if (!authLoading) void load(); }, [authLoading, load]));
   useEffect(() => {
     if (isAdmin !== true) return;
-    const channel = supabase.channel('admin-dashboard-counts-' + Date.now())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'owner_verifications' }, () => void fetchData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'rental_requests' }, () => void fetchData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'dorms' }, () => void fetchData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'support_tickets' }, () => void fetchData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'lgu_certification_requests' }, () => void fetchData())
-      .subscribe();
-    return () => { void supabase.removeChannel(channel); };
-  }, [fetchData, isAdmin]);
-
-  const handleVerification = async (verificationId: string, approve: boolean) => {
-    setActionLoading(verificationId);
-    try {
-      const newStatus = approve ? 'approved' : 'rejected';
-      const { error } = await supabase
-        .from('owner_verifications')
-        .update({ status: newStatus, reviewed_by: user!.id, updated_at: new Date().toISOString() })
-        .eq('verification_id', verificationId);
-
-      if (error) throw error;
-
-      Alert.alert('Success', `Owner verification ${newStatus}.`);
-      setPendingUsers(prev => prev.filter(item => item.verification_id !== verificationId));
-    } catch (err: any) {
-      showError('Verification Error', err.message);
-    } finally {
-      setActionLoading(null);
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = () => { clearTimeout(timer); timer = setTimeout(() => void load(), 400); };
+    const channel = supabase.channel('admin-queues-' + ++channelSequence);
+    for (const table of ['owner_verifications', 'dorms', 'rental_requests', 'support_tickets', 'lgu_certification_requests', 'account_access']) channel.on('postgres_changes', { event: '*', schema: 'public', table }, refresh);
+    channel.subscribe();
+    return () => { clearTimeout(timer); void supabase.removeChannel(channel); };
+  }, [isAdmin, load]);
+  const act = async (id: string, action: () => PromiseLike<{ error: any }>) => {
+    if (busy) return;
+    setBusy(id);
+    try { const result = await action(); if (result.error) throw result.error; await load(); }
+    catch (caught: any) { showError('Could not save', caught.message || 'Please try again.'); }
+    finally { setBusy(null); }
+  };
+  const flags = (item: any, changes: Record<string, boolean>) => act(item.dorm_id, () => supabase.rpc('admin_set_listing_flags', { p_dorm_id: item.dorm_id, ...changes }));
+  const document = (kind: string, id: string) => router.push({ pathname: '/admin-document', params: { kind, id } } as never);
+  const toggleLgu = (item: any) => {
+    if (item.lgu_certified) return Alert.alert('Remove LGU badge?', 'The listing stays published and its certification record is retained.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Remove', style: 'destructive', onPress: () => void flags(item, { p_lgu_certified: false }) }]);
+    const proof = certifications.find((entry) => entry.dorm_id === item.dorm_id && entry.status === 'pending');
+    if (proof) document('lgu', proof.certification_id);
+    else if (certifications.some((entry) => entry.dorm_id === item.dorm_id && entry.status === 'approved')) void flags(item, { p_lgu_certified: true });
+    else showError('LGU proof required', 'The owner must submit an LGU certificate for admin review first.');
+  };
+  const archive = (item: any) => Alert.alert(item.status === 'active' ? 'Remove this listing?' : 'Restore listing?', item.status === 'active' ? 'It will be hidden from discovery. Requests, payments, tenants, and history stay saved.' : 'The listing will appear in discovery again.', [{ text: 'Cancel', style: 'cancel' }, { text: item.status === 'active' ? 'Remove listing' : 'Restore', style: item.status === 'active' ? 'destructive' : 'default', onPress: () => void flags(item, { p_active: item.status !== 'active' }) }]);
+  const moderateAccount = (item: any, operation: 'access' | 'admin' | 'owner_verification') => {
+    const restore = item.access_status === 'suspended';
+    Alert.alert(operation === 'access' ? restore ? 'Restore account access?' : 'Suspend account access?' : 'Revoke this privilege?', 'This changes RoomScout access without deleting the account or transaction history.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Confirm', style: 'destructive', onPress: () => void act(item.user_id, () => operation === 'access' ? supabase.rpc('admin_set_account_access', { p_user_id: item.user_id, p_status: restore ? 'active' : 'suspended', p_reason: restore ? null : 'Access suspended following administrator review.' }) : supabase.rpc('admin_revoke_privilege', { p_user_id: item.user_id, p_privilege: operation })) }]);
+  };
+  const rows = useMemo(() => {
+    const source = tab === 'verifications' ? verifications : tab === 'dorms' ? dorms : tab === 'payments' ? payments : tab === 'support' ? tickets : accounts;
+    const term = query.trim().toLowerCase();
+    return source.filter((item) => {
+      const text = [item.name,item.address,item.subject,item.full_name,item.username,item.email,item.request_id,item.dorms?.name,item.renters?.username,item.renters?.full_name,item.owners?.full_name,item.owners?.username].filter(Boolean).join(' ').toLowerCase();
+      if (term && !text.includes(term)) return false;
+      if (filter === 'all') return true;
+      if (tab === 'dorms') return filter === 'lgu_pending' ? certifications.some((entry) => entry.dorm_id === item.dorm_id && entry.status === 'pending') : filter === 'featured' ? item.is_featured : item.status === filter;
+      if (tab === 'payments') return ['cash','qr'].includes(filter) ? item.payment_method === filter : filter === 'refunds' ? String(item.status).startsWith('refund_') : item.payment_status === filter;
+      if (tab === 'users') return filter === 'owners' ? item.is_owner : filter === 'admins' ? item.is_admin : item.access_status === filter;
+      return item.status === filter;
+    });
+  }, [accounts,certifications,dorms,filter,payments,query,tab,tickets,verifications]);
+  const filters = tab === 'dorms' ? [['all','All'],['active','Published'],['inactive','Removed'],['featured','Featured'],['lgu_pending','LGU review']] : tab === 'payments' ? [['all','All history'],['qr','QR'],['cash','Cash'],['pending_verification','To owner'],['paid','Confirmed'],['refunds','Refunds']] : tab === 'support' ? [['all','All tickets'],['open','Open'],['in_progress','In review'],['resolved','Resolved'],['closed','Closed']] : tab === 'users' ? [['all','All'],['owners','Owners'],['admins','Admins'],['suspended','Suspended']] : [];
+  const counts = { verifications: verifications.length, dorms: dorms.length, payments: payments.length, support: tickets.filter((item) => ['open','in_progress'].includes(item.status)).length, users: accounts.length };
+  const button = (title: string, onPress: () => void, danger = false) => <Pressable accessibilityRole="button" disabled={!!busy} onPress={onPress} style={({ pressed }) => [styles.button,danger && styles.dangerButton,(pressed || !!busy) && styles.dim]}><Text style={[styles.buttonText,danger && { color: AppColors.error }]}>{title}</Text></Pressable>;
+  const renderItem = ({ item }: { item: any }) => {
+    if (tab === 'verifications') return <View style={styles.row}><View style={styles.grow}><Text style={styles.rowTitle}>{item.owners?.full_name || 'Dorm owner'}</Text><Text style={styles.secondary}>@{item.owners?.username || 'account'} · {date(item.created_at)}</Text>{button('Review document', () => document('owner',item.verification_id))}</View></View>;
+    if (tab === 'support') return <Pressable onPress={() => router.push({ pathname: '/support-ticket',params: { ticketId: item.ticket_id } } as never)} style={({ pressed }) => [styles.row,pressed && styles.dim]}><Ionicons name="chatbubble-ellipses-outline" color={AppColors.accent} size={24} /><View style={styles.grow}><Text style={styles.rowTitle}>{item.subject}</Text><Text style={styles.secondary}>{item.status.replace('_',' ')} · {date(item.updated_at)}</Text>{item.related_request_id && <Text style={styles.accent}>Transaction report</Text>}</View><Ionicons name="chevron-forward" size={20} color={AppColors.textSecondary} /></Pressable>;
+    if (tab === 'users') {
+      const identityRequest = payments.find((request) => request.user_id === item.user_id && request.renter_gov_id_url);
+      const identity = identityReviews.find((review) => review.user_id === item.user_id);
+      return <View style={styles.expandingRow}><Pressable onPress={() => setExpandedId(expandedId === item.user_id ? null : item.user_id)} style={styles.horizontal}><View style={styles.grow}><Text style={styles.rowTitle}>{item.full_name}</Text><Text style={styles.accent}>@{item.username || 'account'}</Text><Text style={styles.secondary}>{item.email}</Text><Text style={[styles.secondary,item.access_status === 'suspended' && { color: AppColors.error }]}>{item.is_admin ? 'Administrator' : item.is_owner ? 'Dorm owner' : 'Renter'} · {item.access_status}</Text></View><Ionicons name={expandedId === item.user_id ? 'chevron-up' : 'chevron-down'} color={AppColors.textSecondary} size={22} /></Pressable>{expandedId === item.user_id && <View style={styles.actions}><Text style={styles.secondary}>Renter identity: {identity?.status || (identityRequest ? 'Not reviewed' : 'No request ID submitted')}</Text>{identityRequest && button('Review renter ID',() => document('renter',identityRequest.request_id))}{button(item.access_status === 'suspended' ? 'Restore access' : 'Suspend access',() => moderateAccount(item,'access'),item.access_status !== 'suspended')}{item.is_owner && item.owner_verified && button('Revoke owner verification',() => moderateAccount(item,'owner_verification'),true)}{item.is_admin && button('Revoke admin privilege',() => moderateAccount(item,'admin'),true)}</View>}</View>;
     }
+    if (tab === 'payments') return <View style={styles.expandingRow}><Pressable style={styles.horizontal} onPress={() => setExpandedId(expandedId === item.request_id ? null : item.request_id)}><View style={styles.grow}><Text style={styles.rowTitle}>{item.dorms?.name || 'Dormitory'}</Text><Text style={styles.secondary}>{item.renters?.full_name || item.renters?.username || 'Renter'} · {item.payment_method === 'cash' ? 'Cash in person' : 'QR payment'}</Text><Text style={styles.accent}>{money(item.required_amount)} · {String(item.payment_status).replaceAll('_',' ')}</Text><Text style={styles.secondary}>{date(item.updated_at)}</Text></View><Ionicons name={expandedId === item.request_id ? 'chevron-up' : 'chevron-down'} color={AppColors.textSecondary} size={22} /></Pressable>{expandedId === item.request_id && <View style={styles.actions}><Text selectable style={styles.secondary}>Request {item.request_id}</Text><Text style={styles.secondary}>{item.request_type} · {String(item.status).replaceAll('_',' ')}</Text>{item.payment_verified_at && <Text style={styles.secondary}>Owner confirmed {date(item.payment_verified_at)}</Text>}{item.refund_amount != null && <Text style={styles.secondary}>Refund {money(item.refund_amount)} · Deduction {money(item.refund_deduction)}</Text>}{item.payment_proof_url && button('View payment proof',() => document('payment',item.request_id))}{item.refund_proof_url && button('View refund proof',() => document('refund',item.request_id))}</View>}</View>;
+    const expanded = expandedId === item.dorm_id;
+    const pending = certifications.some((entry) => entry.dorm_id === item.dorm_id && entry.status === 'pending');
+    return <View style={[styles.expandingRow,item.dorm_id === params.itemId && styles.highlight]}><Pressable onPress={() => setExpandedId(expanded ? null : item.dorm_id)} style={styles.horizontal}>{item.images?.[0] ? <Image source={{ uri: item.images[0] }} contentFit="cover" style={styles.thumbnail} /> : <View style={[styles.thumbnail,{ alignItems: 'center', justifyContent: 'center' }]}>
+<Ionicons name="home-outline" size={28} color={AppColors.textMuted} /></View>}<View style={styles.grow}><Text style={styles.rowTitle}>{item.name}</Text><Text numberOfLines={2} style={styles.secondary}>{item.address}</Text><Text style={styles.accent}>{money(item.price)}/month</Text><Text style={styles.secondary}>{item.status === 'active' ? 'Published' : 'Removed'}{item.is_featured ? ' · Featured' : ''}{pending ? ' · LGU review' : ''}</Text></View><Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={20} color={AppColors.textSecondary} /></Pressable>{expanded && <View style={styles.actions}><View style={styles.wrap}>{button('Edit listing',() => router.push({ pathname: '/add-dorm',params: { dormId: item.dorm_id } } as never))}{button(item.is_featured ? 'Unfeature' : 'Feature',() => void flags(item,{ p_featured: !item.is_featured }))}{button(item.lgu_certified ? 'Remove LGU badge' : pending ? 'Review LGU proof' : 'Grant LGU badge',() => toggleLgu(item))}</View>{item.ownership_proof_url && button('View ownership proof',() => document('ownership',item.dorm_id))}{button(item.status === 'active' ? 'Remove listing' : 'Restore listing',() => archive(item),item.status === 'active')}</View>}</View>;
   };
-
-  const handleToggleDormAvailability = async (dormId: string, currentVal: boolean) => {
-    try {
-      const { error } = await supabase
-        .from('dorms')
-        .update({ available: !currentVal })
-        .eq('dorm_id', dormId);
-
-      if (error) throw error;
-
-      setDorms(prev => prev.map(d => d.dorm_id === dormId ? { ...d, available: !currentVal } : d));
-    } catch (err: any) {
-      showError('Error', err.message);
-    }
-  };
-
-  const handlePaymentVerification = async (requestId: string, approve: boolean) => {
-    const cancelled = pendingPayments.find((item) => item.request_id === requestId)?.status === 'cancelled';
-    setActionLoading(requestId);
-    try {
-      const { error } = await supabase.rpc('admin_verify_payment', {
-        p_request_id: requestId,
-        p_approved: approve,
-      });
-      if (error) throw error;
-      setPendingPayments((current) => current.filter((item) => item.request_id !== requestId));
-      Alert.alert(
-        approve ? 'Payment confirmed' : 'Payment rejected',
-          cancelled
-            ? 'Receipt review saved. The request stays cancelled; no tenant slot or refund was created. Any payment return must be arranged directly with the owner.'
-            : approve
-          ? 'The request and dorm availability were updated together.'
-          : 'The renter can review the rejection and submit a corrected proof.',
-      );
-    } catch (err: any) {
-      showError('Verification failed', err.message || 'Please try again.');
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleListingApproval = async (dormId: string, approve: boolean) => {
-    setActionLoading(dormId);
-    try {
-      const { error } = await supabase
-        .from('dorms')
-        .update({ approval_status: approve ? 'approved' : 'rejected', updated_at: new Date().toISOString() })
-        .eq('dorm_id', dormId);
-      if (error) throw error;
-      setDorms((current) => current.map((item) => item.dorm_id === dormId ? { ...item, approval_status: approve ? 'approved' : 'rejected' } : item));
-      Alert.alert(
-        approve ? 'Listing approved' : 'Listing rejected',
-        approve ? 'The dorm is now visible on Home, Search, Map, and Compare.' : 'The dorm remains hidden from public discovery.',
-      );
-    } catch (err: any) {
-      showError('Listing review failed', err.message || 'Please try again.');
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleCertification = async (certificationId: string, approve: boolean) => {
-    setActionLoading(certificationId);
-    try {
-      const { error } = await supabase.rpc('review_lgu_certification', { p_certification_id: certificationId, p_approved: approve });
-      if (error) throw error;
-      await fetchData();
-      Alert.alert('Certification reviewed', approve ? 'The listing now displays its LGU badge.' : 'The owner has been notified that the proof was declined.');
-    } catch (caught: any) {
-      showError('Review failed', caught.message);
-    } finally { setActionLoading(null); }
-  };
-
-  const handleSupportStatus = async (ticketId: string, status: 'in_progress' | 'resolved') => {
-    setActionLoading(ticketId);
-    try {
-      const { error } = await supabase
-        .from('support_tickets')
-        .update({ status, admin_id: user!.id, updated_at: new Date().toISOString() })
-        .eq('ticket_id', ticketId);
-      if (error) throw error;
-      setSupportTickets((current) => status === 'resolved'
-        ? current.filter((ticket) => ticket.ticket_id !== ticketId)
-        : current.map((ticket) => ticket.ticket_id === ticketId ? { ...ticket, status } : ticket));
-    } catch (err: any) {
-      showError('Ticket update failed', err.message || 'Please try again.');
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleDeactivateDorm = (dormId: string, dormName: string, currentStatus: string) => {
-    const isActive = currentStatus === 'active';
-    Alert.alert(
-      isActive ? 'Deactivate Listing' : 'Reactivate Listing',
-      isActive
-        ? `Set "${dormName}" to inactive? It will be hidden from search but kept in the database.`
-        : `Reactivate "${dormName}"? It will become visible again.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: isActive ? 'Deactivate' : 'Reactivate',
-          style: isActive ? 'destructive' : 'default',
-          onPress: async () => {
-            setActionLoading(dormId);
-            try {
-              const newStatus = isActive ? 'inactive' : 'active';
-              const { error } = await supabase
-                .from('dorms')
-                .update({ status: newStatus, updated_at: new Date().toISOString() })
-                .eq('dorm_id', dormId);
-              
-              if (error) throw error;
-              
-              Alert.alert('Success', `Listing ${isActive ? 'deactivated' : 'reactivated'}.`);
-              setDorms(prev => prev.map(d => d.dorm_id === dormId ? { ...d, status: newStatus } : d));
-            } catch (err: any) {
-              showError('Error', err.message);
-            } finally {
-              setActionLoading(null);
-            }
-          }
-        }
-      ]
-    );
-  };
-
-  if (loadingRole) {
-    return (
-      <View style={styles.centered}>
-        <ActivityIndicator size="large" color="#8b5cf6" />
-        <Text style={styles.loadingText}>Authenticating admin session...</Text>
-      </View>
-    );
-  }
-
-  if (isAdmin !== true) {
-    return (
-      <View style={[styles.container, styles.centered]}>
-        <Text style={styles.deniedTitle}>Access Denied</Text>
-        <Text style={styles.deniedText}>
-          You do not have administrative privileges to access this panel.
-        </Text>
-        <Pressable style={styles.backButton} onPress={() => router.replace('/(tabs)/profile' as any)}>
-          <Text style={styles.backButtonText}>Go to Profile</Text>
-        </Pressable>
-      </View>
-    );
-  }
-
-  const renderVerificationItem = ({ item }: { item: any }) => (
-    <View style={styles.card}>
-      <View style={styles.cardInfo}>
-        <Text style={styles.cardTitle}>{item.owners?.full_name || 'Anonymous Owner'}</Text>
-        <Text style={styles.cardSubtitle}>@{item.owners?.username || 'unknown'}</Text>
-        <Text style={styles.cardDetail}>Document: {item.document_url || 'No document'}</Text>
-        <Text style={styles.cardDetail}>Submitted: {new Date(item.created_at).toLocaleDateString()}</Text>
-      </View>
-      <View style={styles.buttonRow}>
-        <Pressable
-          style={[styles.actionBtn, styles.approveBtn, actionLoading === item.verification_id && styles.disabledBtn]}
-          onPress={() => handleVerification(item.verification_id, true)}
-          disabled={actionLoading !== null}
-        >
-          <Text style={styles.actionBtnText}>Approve</Text>
-        </Pressable>
-        <Pressable
-          style={[styles.actionBtn, styles.rejectBtn, actionLoading === item.verification_id && styles.disabledBtn]}
-          onPress={() => handleVerification(item.verification_id, false)}
-          disabled={actionLoading !== null}
-        >
-          <Text style={styles.actionBtnText}>Reject</Text>
-        </Pressable>
-      </View>
-    </View>
-  );
-
-  const renderDormItem = ({ item }: { item: any }) => (
-    <View style={styles.card}>
-      <View style={styles.cardInfo}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-          <Text style={styles.cardTitle}>{item.name}</Text>
-          <View style={[styles.statusBadge, item.approval_status === 'approved' ? styles.approvedBadge : item.approval_status === 'rejected' ? styles.rejectedBadge : styles.pendingBadge]}>
-            <Text style={styles.statusBadgeText}>{String(item.approval_status || 'pending').toUpperCase()}</Text>
-          </View>
-          {item.status === 'inactive' && (
-            <View style={{ backgroundColor: '#fef2f2', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4 }}>
-              <Text style={{ color: '#ef4444', fontSize: 11, fontWeight: '600' }}>INACTIVE</Text>
-            </View>
-          )}
-          {item.lgu_certified && (
-            <View style={{ backgroundColor: '#f0fdf4', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4 }}>
-              <Text style={{ color: '#16a34a', fontSize: 11, fontWeight: '600' }}>LGU ✓</Text>
-            </View>
-          )}
-        </View>
-        <Text style={styles.cardSubtitle}>{item.address}</Text>
-        <Text style={styles.cardPrice}>₱{item.price}/month</Text>
-        <Pressable disabled={!item.ownership_proof_url} onPress={async () => Linking.openURL(await getPrivateDocumentUrl(item.ownership_proof_url))}><Text style={styles.cardSubtitle}>Ownership proof: {item.ownership_proof_url ? 'Open protected image' : 'Missing'}</Text></Pressable>
-      </View>
-      {item.approval_status !== 'approved' && (
-        <View style={styles.buttonRow}>
-          <Pressable style={[styles.actionBtn, styles.approveBtn]} onPress={() => handleListingApproval(item.dorm_id, true)}><Text style={styles.actionBtnText}>Approve listing</Text></Pressable>
-          <Pressable style={[styles.actionBtn, styles.rejectBtn]} onPress={() => handleListingApproval(item.dorm_id, false)}><Text style={styles.actionBtnText}>Reject</Text></Pressable>
-        </View>
-      )}
-      {certifications.filter((request) => request.dorm_id === item.dorm_id).map((request) => <View key={request.certification_id} style={{ gap: 12, paddingVertical: 14 }}>
-        <Text style={styles.cardTitle}>LGU proof awaiting review</Text>
-        <Pressable onPress={async () => { const url = await getPrivateDocumentUrl(request.proof_path); if (url) await Linking.openURL(url); else showError('Proof unavailable', 'The certificate could not be loaded.'); }}><Text style={styles.cardSubtitle}>View certificate</Text></Pressable>
-        <View style={styles.buttonRow}><Pressable disabled={actionLoading !== null} onPress={() => handleCertification(request.certification_id, true)} style={[styles.actionBtn, styles.approveBtn]}><Text style={styles.actionBtnText}>Approve certificate</Text></Pressable><Pressable disabled={actionLoading !== null} onPress={() => handleCertification(request.certification_id, false)} style={[styles.actionBtn, styles.rejectBtn]}><Text style={styles.actionBtnText}>Decline</Text></Pressable></View>
-      </View>)}
-      <View style={styles.dormControlRow}>
-        <View style={styles.switchContainer}>
-          <Text style={styles.switchLabel}>Available:</Text>
-          <Switch
-            value={item.available}
-            onValueChange={() => handleToggleDormAvailability(item.dorm_id, item.available)}
-            trackColor={{ false: '#767577', true: '#8b5cf6' }}
-            thumbColor={item.available ? '#a78bfa' : '#f4f3f4'}
-          />
-        </View>
-        <Text style={styles.switchLabel}>{item.lgu_certified ? 'LGU certified' : 'No approved LGU certificate'}</Text>
-      </View>
-      <View style={{ marginTop: 8 }}>
-        <Pressable
-          style={[styles.actionBtn, item.status === 'active' ? styles.rejectBtn : styles.approveBtn, actionLoading === item.dorm_id && styles.disabledBtn]}
-          onPress={() => handleDeactivateDorm(item.dorm_id, item.name, item.status || 'active')}
-          disabled={actionLoading !== null}
-        >
-          <Text style={styles.actionBtnText}>{item.status === 'active' ? 'Deactivate' : 'Reactivate'}</Text>
-        </Pressable>
-      </View>
-    </View>
-  );
-
-  const renderPaymentItem = ({ item }: { item: any }) => (
-    <View style={styles.card}>
-      <View style={styles.cardInfo}>
-        <Text style={styles.cardTitle}>{item.dorms?.name || 'Dormitory payment'}</Text>
-        <Text style={styles.cardSubtitle}>Renter: {item.renters?.full_name || item.renters?.username || 'Account holder'}</Text>
-        <Text style={styles.cardPrice}>₱{Number(item.required_amount || 0).toLocaleString('en-PH')} · {item.request_type}</Text>
-          {item.status === 'cancelled' && <Text style={styles.cardSubtitle}>Cancelled request · Review receipt only. Do not create a tenancy or refund.</Text>}
-        <Pressable disabled={!item.payment_proof_url} onPress={async () => Linking.openURL(await getPrivateDocumentUrl(item.payment_proof_url))}><Text style={styles.cardSubtitle}>Proof: {item.payment_proof_url ? 'Open protected receipt' : 'Missing'}</Text></Pressable>
-        <Text style={styles.cardSubtitle}>Contract agreed: {item.contract_agreed ? 'Yes' : 'No'}</Text>
-      </View>
-      <View style={styles.buttonRow}>
-        <Pressable disabled={actionLoading !== null} style={[styles.actionBtn, styles.approveBtn]} onPress={() => handlePaymentVerification(item.request_id, true)}><Text style={styles.actionBtnText}>{item.status === 'cancelled' ? 'Verify receipt only' : 'Verify & confirm'}</Text></Pressable>
-        <Pressable disabled={actionLoading !== null} style={[styles.actionBtn, styles.rejectBtn]} onPress={() => handlePaymentVerification(item.request_id, false)}><Text style={styles.actionBtnText}>Reject proof</Text></Pressable>
-      </View>
-    </View>
-  );
-
-  const renderSupportTicket = ({ item }: { item: any }) => (
-    <View style={styles.card}>
-      <View style={styles.cardInfo}>
-        <Text style={styles.cardTitle}>{item.subject}</Text>
-        <Text style={styles.cardDetail}>{item.description}</Text>
-        <Text style={styles.cardSubtitle}>Submitted {new Date(item.created_at).toLocaleDateString()} · {item.status.replace('_', ' ')}</Text>
-      </View>
-      <View style={styles.buttonRow}>
-        {item.status === 'open' && <Pressable disabled={actionLoading !== null} style={[styles.actionBtn, styles.approveBtn]} onPress={() => handleSupportStatus(item.ticket_id, 'in_progress')}><Text style={styles.actionBtnText}>Start review</Text></Pressable>}
-        <Pressable disabled={actionLoading !== null} style={[styles.actionBtn, styles.rejectBtn]} onPress={() => handleSupportStatus(item.ticket_id, 'resolved')}><Text style={styles.actionBtnText}>Resolve</Text></Pressable>
-      </View>
-    </View>
-  );
-
-  return (
-    <View style={styles.container}>
-      {/* Tabs */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabContainer}>
-        <Pressable
-          style={[styles.tab, activeTab === 'verifications' && styles.activeTab]}
-          onPress={() => setActiveTab('verifications')}
-        >
-          <Text style={[styles.tabText, activeTab === 'verifications' && styles.activeTabText]}>
-            Verifications ({pendingUsers.length})
-          </Text>
-        </Pressable>
-        <Pressable
-          style={[styles.tab, activeTab === 'support' && styles.activeTab]}
-          onPress={() => setActiveTab('support')}
-        >
-          <Text style={[styles.tabText, activeTab === 'support' && styles.activeTabText]}>
-            Support ({supportTickets.length})
-          </Text>
-        </Pressable>
-        <Pressable
-          style={[styles.tab, activeTab === 'payments' && styles.activeTab]}
-          onPress={() => setActiveTab('payments')}
-        >
-          <Text style={[styles.tabText, activeTab === 'payments' && styles.activeTabText]}>
-            Payments ({pendingPayments.length})
-          </Text>
-        </Pressable>
-        <Pressable 
-          style={[styles.tab, activeTab === 'dorms' && styles.activeTab]}
-          onPress={() => setActiveTab('dorms')}
-        >
-          <Text style={[styles.tabText, activeTab === 'dorms' && styles.activeTabText]}>
-            Manage Dorms ({dorms.length}){certifications.length > 0 ? ' · ' + certifications.length + ' LGU' : ''}
-          </Text>
-        </Pressable>
-      </ScrollView>
-
-      {/* Main List */}
-      <FlatList
-        data={activeTab === 'verifications' ? pendingUsers : activeTab === 'payments' ? pendingPayments : activeTab === 'dorms' ? dorms : supportTickets}
-        keyExtractor={(item) => activeTab === 'verifications' ? item.verification_id : activeTab === 'payments' ? item.request_id : activeTab === 'dorms' ? item.dorm_id : item.ticket_id}
-        renderItem={activeTab === 'verifications' ? renderVerificationItem : activeTab === 'payments' ? renderPaymentItem : activeTab === 'dorms' ? renderDormItem : renderSupportTicket}
-        refreshing={refreshing}
-        onRefresh={fetchData}
-        contentContainerStyle={styles.listContainer}
-        ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <Text style={styles.emptyText}>
-              {activeTab === 'verifications'
-                ? 'No pending verification requests'
-                : activeTab === 'payments'
-                  ? 'No payment proofs waiting for verification'
-                  : activeTab === 'dorms'
-                    ? 'No dormitories listed in the database'
-                    : 'No open support tickets'}
-            </Text>
-          </View>
-        }
-      />
-    </View>
-  );
+  return <View style={[styles.screen,{ paddingBottom: insets.bottom }]}><Stack.Screen options={{ headerShown: true,title: 'Admin dashboard',headerStyle: { backgroundColor: AppColors.background },headerTintColor: AppColors.text }} />{loading || authLoading ? <View style={styles.center}><ActivityIndicator color={AppColors.accent} /><Text style={styles.secondary}>Loading administration…</Text></View> : !isAdmin ? <View style={styles.center}><Ionicons name="lock-closed-outline" size={32} color={AppColors.textSecondary} /><Text style={styles.rowTitle}>Administrator access required</Text>{error && <Text style={styles.error}>{error}</Text>}{button('Back to profile',() => router.replace('/(tabs)/profile' as never))}</View> : <><ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabs} contentContainerStyle={styles.tabContent}>{tabs.map((item) => <Pressable key={item.key} onPress={() => { setTab(item.key); setQuery(''); setFilter('all'); setExpandedId(null); }} style={({ pressed }) => [styles.tab,tab === item.key && styles.tabSelected,pressed && styles.dim]}><Ionicons name={item.icon} size={20} color={tab === item.key ? AppColors.accent : AppColors.textSecondary} /><Text style={[styles.secondary,tab === item.key && styles.accent]}>{item.title} ({counts[item.key]})</Text></Pressable>)}</ScrollView><View style={styles.search}><Ionicons name="search" size={20} color={AppColors.textSecondary} /><TextInput value={query} onChangeText={setQuery} placeholder={'Search ' + tabs.find((item) => item.key === tab)?.title.toLowerCase()} placeholderTextColor={AppColors.placeholder} style={styles.input} autoCapitalize="none" accessibilityLabel="Search admin records" /></View>{filters.length > 0 && <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filters} contentContainerStyle={styles.filterContent}>{filters.map(([key,title]) => <Pressable key={key} onPress={() => setFilter(key)} style={({ pressed }) => [styles.chip,filter === key && styles.chipSelected,pressed && styles.dim]}><Text style={[styles.secondary,filter === key && styles.accent]}>{title}</Text></Pressable>)}</ScrollView>}{error ? <Pressable onPress={() => void load()} style={styles.errorBox}><Text style={styles.error}>{error} Tap to retry.</Text></Pressable> : null}{tab === 'verifications' && <Text style={styles.caption}>Owner checks are requests to verify an owner’s ID or business permit. An administrator must approve the submitted document.</Text>}{tab === 'payments' && <Text style={styles.caption}>Read-only history. Dorm owners confirm payments.</Text>}<FlatList data={rows} keyExtractor={(item) => String(tab === 'dorms' ? item.dorm_id : item.verification_id || item.ticket_id || item.request_id || item.user_id)} renderItem={renderItem} contentContainerStyle={styles.list} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); void load(); }} tintColor={AppColors.accent} />} ListEmptyComponent={<View style={styles.empty}><Ionicons name="file-tray-outline" size={32} color={AppColors.textMuted} /><Text style={styles.rowTitle}>{query || filter !== 'all' ? 'No matching records' : tab === 'verifications' ? 'No owner checks pending' : 'Nothing here yet'}</Text><Text style={styles.secondary}>{query || filter !== 'all' ? 'Try another search or filter.' : tab === 'verifications' ? 'When a dorm owner submits an ID or business permit, it will appear here for admin approval. Verified owners are listed under Accounts.' : 'New records will appear here automatically.'}</Text></View>} /></>}</View>;
 }
-
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: AppColors.background,
-  },
-  centered: {
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
-  loadingText: {
-    marginTop: 12,
-    fontSize: 16,
-    color: AppColors.textSecondary,
-    fontWeight: '500',
-  },
-  deniedTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: AppColors.error,
-    marginBottom: 10,
-  },
-  deniedText: {
-    fontSize: 16,
-    color: AppColors.textSecondary,
-    textAlign: 'center',
-    marginBottom: 24,
-    lineHeight: 24,
-  },
-  backButton: {
-    backgroundColor: AppColors.accent,
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: BorderRadius.md,
-  },
-  backButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  tabContainer: {
-    flexDirection: 'row',
-    backgroundColor: AppColors.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: AppColors.borderSubtle,
-    minWidth: '100%',
-  },
-  tab: {
-    minWidth: 112,
-    paddingVertical: 16,
-    paddingHorizontal: 10,
-    alignItems: 'center',
-    borderBottomWidth: 3,
-    borderBottomColor: 'transparent',
-  },
-  activeTab: {
-    borderBottomColor: AppColors.accent,
-  },
-  tabText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: AppColors.textSecondary,
-  },
-  activeTabText: {
-    color: AppColors.accent,
-  },
-  listContainer: {
-    padding: 16,
-    paddingBottom: 40,
-  },
-  card: {
-    backgroundColor: AppColors.surface,
-    borderRadius: BorderRadius.lg,
-    padding: 16,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: AppColors.borderSubtle,
-  },
-  cardInfo: {
-    marginBottom: 14,
-  },
-  cardTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: AppColors.text,
-    marginBottom: 4,
-  },
-  cardSubtitle: {
-    fontSize: 14,
-    color: AppColors.accent,
-    fontWeight: '600',
-    marginBottom: 4,
-  },
-  cardDetail: {
-    fontSize: 12,
-    color: AppColors.textSecondary,
-    marginTop: 4,
-  },
-  cardPrice: {
-    fontSize: 16,
-    color: AppColors.success,
-    fontWeight: '700',
-    marginTop: 4,
-  },
-  statusBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 999,
-  },
-  approvedBadge: { backgroundColor: AppColors.success },
-  rejectedBadge: { backgroundColor: AppColors.error },
-  pendingBadge: { backgroundColor: AppColors.warning },
-  statusBadgeText: { color: AppColors.white, fontSize: 10, fontWeight: '800' },
-  buttonRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-    gap: 12,
-  },
-  dormControlRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  switchContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  switchLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: AppColors.textSecondary,
-  },
-  actionBtn: {
-    flexGrow: 1,
-    flexBasis: 120,
-    paddingVertical: 10,
-    borderRadius: BorderRadius.md,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  approveBtn: {
-    backgroundColor: AppColors.success,
-  },
-  rejectBtn: {
-    backgroundColor: AppColors.error,
-  },
-  deleteBtn: {
-    backgroundColor: AppColors.error,
-    maxWidth: 100,
-  },
-  disabledBtn: {
-    opacity: 0.6,
-  },
-  actionBtnText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  emptyContainer: {
-    paddingVertical: 80,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  emptyText: {
-    fontSize: 16,
-    color: AppColors.textMuted,
-    textAlign: 'center',
-  },
+  screen: { flex: 1,backgroundColor: AppColors.background }, center: { flex: 1,alignItems: 'center',justifyContent: 'center',padding: Spacing.four,gap: Spacing.three },
+  tabs: { flexGrow: 0,flexShrink: 0,borderBottomWidth: StyleSheet.hairlineWidth,borderBottomColor: AppColors.borderSubtle },tabContent: { paddingHorizontal: Spacing.two,gap: Spacing.two },tab: { padding: Spacing.three,alignItems: 'center',gap: Spacing.one,borderBottomWidth: 2,borderBottomColor: 'transparent' },tabSelected: { borderBottomColor: AppColors.accent },
+  search: { flexDirection: 'row',alignItems: 'center',gap: Spacing.two,margin: Spacing.three,backgroundColor: AppColors.input,borderRadius: BorderRadius.md,borderCurve: 'continuous',paddingHorizontal: Spacing.three },input: { flex: 1,minWidth: 0,minHeight: 48,color: AppColors.text,fontSize: 15 },
+  filters: { flexGrow: 0,flexShrink: 0 },filterContent: { paddingHorizontal: Spacing.three,gap: Spacing.two,paddingBottom: Spacing.two },chip: { paddingHorizontal: Spacing.three,paddingVertical: Spacing.two,borderRadius: BorderRadius.full,backgroundColor: AppColors.surface },chipSelected: { backgroundColor: AppColors.surfaceElevated },
+  list: { paddingHorizontal: Spacing.three,paddingBottom: Spacing.four,flexGrow: 1 },row: { flexDirection: 'row',alignItems: 'center',gap: Spacing.three,paddingVertical: Spacing.three,borderBottomWidth: StyleSheet.hairlineWidth,borderBottomColor: AppColors.borderSubtle },expandingRow: { paddingVertical: Spacing.three,borderBottomWidth: StyleSheet.hairlineWidth,borderBottomColor: AppColors.borderSubtle },horizontal: { flexDirection: 'row',alignItems: 'center',gap: Spacing.three },grow: { flex: 1,minWidth: 0,gap: Spacing.one },
+  rowTitle: { color: AppColors.text,fontSize: 16,fontWeight: '600' },secondary: { color: AppColors.textSecondary,fontSize: 13,lineHeight: 19,flexShrink: 1 },accent: { color: AppColors.accent,fontSize: 13,fontWeight: '600' },thumbnail: { width: 64,height: 64,borderRadius: BorderRadius.sm,backgroundColor: AppColors.surfaceElevated },actions: { gap: Spacing.two,paddingTop: Spacing.two },wrap: { flexDirection: 'row',flexWrap: 'wrap',gap: Spacing.two },
+  button: { alignItems: 'center',justifyContent: 'center',alignSelf: 'flex-start',minHeight: 44,paddingHorizontal: Spacing.three,paddingVertical: Spacing.two,borderRadius: BorderRadius.md,borderCurve: 'continuous',backgroundColor: AppColors.surfaceElevated },buttonText: { color: AppColors.accent,fontWeight: '600',fontSize: 14 },dangerButton: { backgroundColor: AppColors.errorBg },dim: { opacity: 0.6 },empty: { alignItems: 'center',gap: Spacing.two,paddingVertical: Spacing.six },error: { color: AppColors.error,lineHeight: 20 },errorBox: { marginHorizontal: Spacing.three,marginBottom: Spacing.two,padding: Spacing.two,backgroundColor: AppColors.errorBg,borderRadius: BorderRadius.sm },caption: { color: AppColors.textSecondary,fontSize: 12,paddingHorizontal: Spacing.three,paddingBottom: Spacing.two },highlight: { backgroundColor: AppColors.surfaceElevated },
 });

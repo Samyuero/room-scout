@@ -64,7 +64,7 @@ export function findDormsFromPrompt(
 
   const budget = numberFromMatch(budgetMatch?.[1]);
   if (budget !== null) filters.maxPrice = budget;
-  if (radiusMatch?.[1]) filters.radiusKm = Math.max(1, Math.min(8, Number(radiusMatch[1])));
+  if (radiusMatch?.[1]) { filters.radiusKm = Math.max(0.1, Math.min(20000, Number(radiusMatch[1]))); filters.radiusEnabled = true; }
   if (/pet|dog|cat/.test(lower)) filters.petFriendly = true;
   if (/lgu|certified|verified property/.test(lower)) filters.lguCertified = true;
   if (/motorcycle|motorbike/.test(lower)) filters.parking = ['Motorcycle'];

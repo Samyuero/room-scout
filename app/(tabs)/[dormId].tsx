@@ -1,7 +1,8 @@
 import { ErrorToast, showError } from '@/components/error-toast';
 import { useState, useCallback, useEffect, useMemo } from 'react';
-import { View, Text, Image, StyleSheet, ActivityIndicator, Button, Pressable, Modal, TextInput, ScrollView, Linking, Alert, useWindowDimensions } from 'react-native';
+import { View, Text, Image, StyleSheet, ActivityIndicator, Pressable, Modal, TextInput, ScrollView, Linking, Alert, useWindowDimensions } from 'react-native';
 import { PhotoViewer } from '@/components/photo-viewer';
+import { BookingDocument } from '@/components/booking-document';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../../src/lib/supabase';
 import { useLocalSearchParams, useFocusEffect, useRouter } from 'expo-router';
@@ -12,7 +13,7 @@ import { useNotifications } from '@/context/notification-context';
 import { useDiscovery } from '@/context/discovery-context';
 import { getPrivateDocumentUrl, getSafeImageExtension, uploadImage, uploadPrivateImage } from '@/utils/imageUpload';
 import { AppColors, BorderRadius } from '@/constants/theme';
-import { canCancelRentalRequest, rentalCancellationWarning } from '@/lib/rental-workflow';
+import { canCancelRentalRequest, canRequestBookingRefund, rentalCancellationWarning } from '@/lib/rental-workflow';
 import { logEvent } from '@/lib/logger';
 
 export default function DormDetails() {
@@ -46,7 +47,6 @@ export default function DormDetails() {
   const [paymentMethod, setPaymentMethod] = useState<'qr' | 'cash'>('qr');
   const [contractAgreed, setContractAgreed] = useState(false);
   const [secureQrUrl, setSecureQrUrl] = useState('');
-  const [secureContractUrl, setSecureContractUrl] = useState('');
 
   useEffect(() => {
     setRentalModalVisible(false);
@@ -57,19 +57,14 @@ export default function DormDetails() {
   useEffect(() => {
     let active = true;
     async function loadProtectedPaymentFiles() {
-      const [qr, contract] = await Promise.all([
-        getPrivateDocumentUrl(requestDetails?.owner_payment_qr_url || ''),
-        getPrivateDocumentUrl(requestDetails?.contract_url || ''),
-      ]);
+      const qr = await getPrivateDocumentUrl(requestDetails?.owner_payment_qr_url || '');
       if (active) {
         setSecureQrUrl(qr);
-        setSecureContractUrl(contract);
       }
     }
     if (requestDetails?.status === 'awaiting_payment') void loadProtectedPaymentFiles();
     else {
       setSecureQrUrl('');
-      setSecureContractUrl('');
     }
     return () => { active = false; };
   }, [requestDetails]);
@@ -145,20 +140,25 @@ export default function DormDetails() {
 
   const handleToggleAvailability = async () => {
     if (!dorm || !dormId || !isOwner) return;
+    if (!dorm.available && Number(dorm.occupied_tenants || 0) >= Number(dorm.max_tenants || 1)) {
+      showError('No free slots', 'End a tenancy or release a reservation before reopening this dorm.'); return;
+    }
     try {
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('dorms')
         .update({ available: !dorm.available })
-        .eq('dorm_id', dormId);
+        .eq('dorm_id', dormId).select('available,availability_status').single();
 
       if (error) throw error;
 
       setDorm((prev: any) => ({
         ...prev,
-        available: !prev.available,
+        ...data,
       }));
+      await refreshDiscovery();
     } catch (error) {
       console.error('Error updating availability:', error);
+      showError('Availability not updated', error instanceof Error ? error.message : 'Please retry.');
     }
   };
 
@@ -196,7 +196,7 @@ export default function DormDetails() {
       const idPath = idDocumentUrl.startsWith('file:') || idDocumentUrl.startsWith('content:')
         ? await uploadPrivateImage(`${user.id}/government-id/${Date.now()}.${getSafeImageExtension(idDocumentUrl)}`, idDocumentUrl)
         : idDocumentUrl.trim();
-      const { data: currentRequests, error: readError } = await supabase.from('rental_requests').select('request_id').eq('dorm_id', dormId).eq('user_id', user.id).in('status', ['pending', 'awaiting_payment', 'awaiting_cash', 'payment_submitted', 'approved', 'reserved']).limit(1);
+      const { data: currentRequests, error: readError } = await supabase.from('rental_requests').select('request_id').eq('dorm_id', dormId).eq('user_id', user.id).in('status', ['pending', 'awaiting_payment', 'awaiting_cash', 'payment_submitted', 'approved', 'reserved', 'refund_requested', 'refund_sent']).limit(1);
       if (readError) throw readError;
       if (currentRequests?.length) throw new Error('You already have an active request for this dorm.');
       const { error } = await supabase.from('rental_requests').insert({ dorm_id: dormId, user_id: user.id, owner_id: currentDorm.owner_id, status: 'pending', renter_gov_id_url: idPath, message: extraDetails.trim().slice(0, 1000), request_type: requestType, payment_method: paymentMethod });
@@ -255,10 +255,10 @@ export default function DormDetails() {
       setRentalModalVisible(false);
       setPaymentProofUrl('');
       setContractAgreed(false);
-      Alert.alert('Payment proof submitted', 'The admin and dorm owner can now review the proof.');
+      Alert.alert('Payment proof submitted', 'Your dorm owner will review and confirm the payment.');
     } catch (error: any) {
       if (error?.code === 'PGRST116') {
-        showError('Request changed', 'Refresh this request. If it was cancelled after you paid, contact the owner directly about the payment.');
+        showError('Request changed', 'Refresh this request. Your booking and any payment review are available in Bookings & history.');
         await loadDorm();
       } else showError('Upload failed', error.message || 'Could not submit payment proof.');
     } finally {
@@ -268,6 +268,10 @@ export default function DormDetails() {
 
   const handleCancelRental = async () => {
     if (!user || !dorm || isOwner || requestingRental) return;
+    if (canRequestBookingRefund(requestDetails)) {
+      router.push({ pathname: '/booking-history', params: { requestId: requestDetails.request_id } } as never);
+      return;
+    }
     if (!requestDetails?.request_id || !canCancelRentalRequest(requestDetails)) {
       Alert.alert('Request unavailable', 'Refresh this listing and try again.');
       return;
@@ -299,7 +303,7 @@ export default function DormDetails() {
               if (refreshes.some((result) => result.status === 'rejected')) {
                 logEvent('warn', 'rental_post_cancel_refresh_failed', { userId: user.id, requestId: requestDetails.request_id });
               }
-              Alert.alert('Request cancelled', 'The owner has been notified. No refund was issued by RoomScout. Contact the owner directly if you want to ask for a payment return.');
+              Alert.alert('Request cancelled', 'The owner has been notified. Any uploaded receipt will still be reviewed. If payment is confirmed, you can request the 90% refund in Bookings & history.');
             } catch (error: any) {
               logEvent('warn', 'rental_request_cancellation_failed', { userId: user.id, requestId: requestDetails.request_id, code: error?.code || 'network_or_unknown' });
               showError('Error', error.message || 'Failed to cancel rental.');
@@ -469,10 +473,8 @@ export default function DormDetails() {
     }
   };
 
-  const openExactMap = async () => {
-    const geo = `geo:${dorm.latitude},${dorm.longitude}?q=${dorm.latitude},${dorm.longitude}(${encodeURIComponent(dorm.name)})`;
-    if (await Linking.canOpenURL(geo)) await Linking.openURL(geo);
-    else await Linking.openURL(`https://www.openstreetmap.org/?mlat=${dorm.latitude}&mlon=${dorm.longitude}#map=18/${dorm.latitude}/${dorm.longitude}`);
+  const openExactMap = () => {
+    router.push({ pathname: '/(tabs)/map', params: { dormId: dorm.dorm_id, lat: String(dorm.latitude), lng: String(dorm.longitude) } } as never);
   };
 
   const addToCompare = () => {
@@ -553,7 +555,7 @@ export default function DormDetails() {
         <View style={styles.detailMap}><LeafletMapView dorms={detailMapDorms} center={detailMapCenter} radiusKm={1} userLocation={null} showAnalytics={false} onSelectDorm={openExactMap} /></View>
         <Pressable style={styles.navigationButton} onPress={openExactMap}><Text style={styles.navigationButtonText}>Open exact location in Maps</Text></Pressable>
 
-        {!authLoading && !isOwner && <View style={styles.primaryActions}><Pressable onPress={addToCompare} style={styles.actionSecondary}><Text style={styles.actionSecondaryText}>Compare</Text></Pressable><Pressable disabled={requestingRental || ['pending', 'payment_submitted', 'awaiting_cash'].includes(rentalRequestStatus || '') || (!dorm.available && !canCancelRentalRequest(requestDetails))} onPress={() => ['approved', 'reserved'].includes(rentalRequestStatus || '') ? handleCancelRental() : handleRequestRental()} style={styles.actionPrimary}><Text style={styles.actionPrimaryText}>{rentalRequestStatus === 'awaiting_payment' ? 'Review contract & pay' : rentalRequestStatus === 'awaiting_cash' ? 'Pending cash payment' : rentalRequestStatus === 'pending' ? 'Request pending' : rentalRequestStatus === 'payment_submitted' ? 'Payment under review' : rentalRequestStatus === 'approved' ? 'Cancel rental' : rentalRequestStatus === 'reserved' ? 'Cancel reservation' : 'Request Rental'}</Text></Pressable></View>}
+        {!authLoading && !isOwner && <View style={styles.primaryActions}><Pressable onPress={addToCompare} style={styles.actionSecondary}><Text style={styles.actionSecondaryText}>Compare</Text></Pressable><Pressable disabled={requestingRental || ['pending', 'payment_submitted', 'awaiting_cash', 'refund_requested', 'refund_sent'].includes(rentalRequestStatus || '') || (!dorm.available && !canCancelRentalRequest(requestDetails))} onPress={() => ['approved', 'reserved'].includes(rentalRequestStatus || '') ? handleCancelRental() : handleRequestRental()} style={styles.actionPrimary}><Text style={styles.actionPrimaryText}>{rentalRequestStatus === 'awaiting_payment' ? 'Review contract & pay' : rentalRequestStatus === 'awaiting_cash' ? 'Pending cash payment' : rentalRequestStatus === 'pending' ? 'Request pending' : rentalRequestStatus === 'payment_submitted' ? 'Payment under review' : ['refund_requested', 'refund_sent'].includes(rentalRequestStatus || '') ? 'Refund in progress' : rentalRequestStatus === 'approved' ? 'Cancel rental' : rentalRequestStatus === 'reserved' ? 'Cancel reservation' : 'Request Rental'}</Text></Pressable></View>}
         <View style={styles.contactCard}>
           <View style={styles.contactHeading}>
             <View style={styles.ownerAvatar}><Ionicons name="person" size={20} color={AppColors.accent} /></View>
@@ -568,7 +570,9 @@ export default function DormDetails() {
         </View>
 
         {!isOwner && canCancelRentalRequest(requestDetails) && !['approved', 'reserved'].includes(rentalRequestStatus || '') && <Pressable disabled={requestingRental} style={styles.actionSecondary} onPress={handleCancelRental}><Text style={styles.actionSecondaryText}>{requestingRental ? 'Please wait…' : 'Cancel request'}</Text></Pressable>}
-        {!isOwner && rentalRequestStatus === 'cancelled' && <Text style={{ color: AppColors.textSecondary, paddingVertical: 14 }}>Request cancelled. RoomScout does not issue refunds. {requestDetails?.payment_status === 'pending_verification' ? 'Your receipt is still awaiting review; this will not reopen your request. ' : ''}Arrange any payment return directly with the owner.</Text>}
+        {!isOwner && requestDetails && <Pressable style={styles.actionSecondary} onPress={() => router.push({ pathname: '/booking-history', params: { requestId: requestDetails.request_id } } as never)}><Text style={styles.actionSecondaryText}>Booking status & history</Text></Pressable>}
+        {!isOwner && rentalRequestStatus === 'cancelled' && <Text style={{ color: AppColors.textSecondary, paddingVertical: 14 }}>Request cancelled. {requestDetails?.payment_status === 'pending_verification' ? 'Your receipt is still awaiting owner review. ' : ''}{requestDetails?.payment_status === 'paid' ? 'Request the recorded 90% refund in Booking status & history.' : 'Any confirmed payment can enter the refund process in your booking history.'}</Text>}
+        {!isOwner && ['refund_requested', 'refund_sent'].includes(rentalRequestStatus || '') && <Text style={{ color: AppColors.textSecondary, paddingVertical: 14 }}>Your cancellation and refund are in progress. Open Booking status & history to view the next step.</Text>}
         {!isOwner && rentalRequestStatus === 'awaiting_cash' && <Text style={{ color: AppColors.warning, paddingVertical: 14 }}>Pending cash payment · Meet the owner to pay. Your tenancy is confirmed when the owner records payment.</Text>}
         <View style={styles.summaryGrid}>
           <View style={styles.summaryItem}><Text style={styles.summaryLabel}>Reservation fee</Text><Text style={styles.summaryValue}>₱{Number(dorm.reservation_fee || 0).toLocaleString('en-PH')}</Text></View>
@@ -780,18 +784,18 @@ export default function DormDetails() {
                         <Text style={styles.qrText}>Owner payment QR</Text>
                       </View>
                     ) : <Text style={styles.qrText}>The owner has not attached a QR yet.</Text>}
-                    <Text style={styles.inputLabel}>Contract</Text>
-                    <Pressable onPress={() => secureContractUrl && Linking.openURL(secureContractUrl)}>
-                      <Text style={{ color: '#2563eb', marginBottom: 12 }}>{secureContractUrl ? 'Open contract document' : 'Contract link unavailable'}</Text>
-                    </Pressable>
-                    <Pressable onPress={() => setContractAgreed((value) => !value)} style={{ padding: 12, borderWidth: 1, borderColor: contractAgreed ? '#16a34a' : '#d1d5db', borderRadius: 8, marginBottom: 12 }}>
-                      <Text style={{ color: AppColors.text }}>{contractAgreed ? '✓ ' : ''}I reviewed and agree to the contract</Text>
+                    {requestDetails?.contract_url ? <BookingDocument path={requestDetails.contract_url} label="Contract" /> : <Text style={styles.qrText}>The contract image is unavailable. Ask the owner to update this request.</Text>}
+                    <Pressable accessibilityRole="radio" accessibilityState={{ checked: contractAgreed, disabled: requestingRental }} disabled={requestingRental} onPress={() => setContractAgreed((value) => !value)} style={({ pressed }) => [styles.agreementRow, pressed && styles.controlPressed]}>
+                      <Ionicons name={contractAgreed ? 'radio-button-on' : 'radio-button-off'} size={22} color={contractAgreed ? AppColors.accent : AppColors.textSecondary} />
+                      <Text style={styles.agreementText}>I reviewed and agree to the contract</Text>
                     </Pressable>
                     <Text style={styles.inputLabel}>Payment proof</Text>
-                    <Pressable onPress={() => pickTransactionImage('payment')} style={styles.photoButton}><Text style={styles.photoButtonText}>{paymentProofUrl ? 'Change selected receipt' : 'Choose receipt image'}</Text></Pressable>
-                    <View style={styles.modalActions}>
-                        <Button title="Close" onPress={() => setRentalModalVisible(false)} color="#999" />
-                      <Button title="Submit Payment Proof" onPress={submitPaymentProof} disabled={requestingRental} />
+                    <Pressable accessibilityRole="button" accessibilityLabel={paymentProofUrl ? 'Replace payment receipt image' : 'Choose payment receipt image'} disabled={requestingRental} onPress={() => pickTransactionImage('payment')} style={({ pressed }) => [styles.photoButton, pressed && styles.controlPressed]}>
+                      {paymentProofUrl ? <Image source={{ uri: paymentProofUrl }} style={styles.receiptPreview} resizeMode="contain" /> : <><Ionicons name="image-outline" size={26} color={AppColors.accent} /><Text style={styles.photoButtonText}>Choose receipt image</Text></>}
+                    </Pressable>
+                    <View style={[styles.modalActions, styles.paymentActions]}>
+                      <Pressable accessibilityRole="button" disabled={requestingRental} onPress={() => setRentalModalVisible(false)} style={({ pressed }) => [styles.modalButton, styles.paymentActionButton, styles.modalButtonSecondary, pressed && styles.controlPressed]}><Text style={styles.modalButtonSecondaryText}>Close</Text></Pressable>
+                      <Pressable accessibilityRole="button" accessibilityLabel="Submit payment proof" accessibilityState={{ disabled: requestingRental, busy: requestingRental }} onPress={() => void submitPaymentProof()} disabled={requestingRental} style={({ pressed }) => [styles.modalButton, styles.paymentActionButton, styles.modalButtonPrimary, requestingRental && styles.controlDisabled, pressed && styles.controlPressed]}>{requestingRental ? <ActivityIndicator color={AppColors.white} /> : <Text style={styles.modalButtonPrimaryText}>Submit</Text>}</Pressable>
                     </View>
                   </>
                 ) : (
@@ -1173,6 +1177,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
   },
+  agreementRow: { alignSelf: 'center', flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 10, paddingVertical: 16, paddingHorizontal: 8 },
+  agreementText: { flexShrink: 1, color: AppColors.text, fontSize: 14, lineHeight: 21, textAlign: 'center' },
+  receiptPreview: { width: '100%', height: 170 },
+  paymentActions: { justifyContent: 'flex-end', flexWrap: 'wrap', paddingTop: 6 },
+  paymentActionButton: { flex: 0, minWidth: 92, paddingHorizontal: 18, paddingVertical: 12 },
   modalButton: { flex: 1, minHeight: 48, alignItems: 'center', justifyContent: 'center', borderRadius: BorderRadius.lg },
   modalButtonSecondary: { borderWidth: 1, borderColor: AppColors.border, backgroundColor: AppColors.surfaceElevated },
   modalButtonPrimary: { backgroundColor: AppColors.accent },

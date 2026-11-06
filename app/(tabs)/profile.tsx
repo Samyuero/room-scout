@@ -1,5 +1,5 @@
 import { ErrorToast, showError } from '@/components/error-toast';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { View, Text, Image, StyleSheet, ActivityIndicator, TextInput, Alert, Pressable, ScrollView, Modal } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../../src/lib/supabase';
@@ -35,6 +35,7 @@ export default function Profile() {
   }, [requestUnreadCount]);
   const [avatarUri, setAvatarUri] = useState('');
   const [saving, setSaving] = useState(false);
+  const loadedProfileId = useRef<string | null>(null);
 
   useFocusEffect(useCallback(() => {
     if (!user?.id) return;
@@ -72,11 +73,11 @@ export default function Profile() {
   const [showMapPicker, setShowMapPicker] = useState(false);
   const [savingPref, setSavingPref] = useState(false);
 
-  useEffect(() => {
+  useFocusEffect(useCallback(() => {
     const loadProfile = async () => {
       if (!user) return;
 
-      setLoading(true);
+      if (loadedProfileId.current !== user.id) setLoading(true);
       try {
         // Determine which role table the user belongs to
         const [renterRes, ownerRes, adminRes] = await Promise.all([
@@ -84,6 +85,7 @@ export default function Profile() {
           supabase.from('owners').select('*').eq('owner_id', user.id).maybeSingle(),
           supabase.from('admins').select('*').eq('admin_id', user.id).maybeSingle()
         ]);
+        if (renterRes.error || ownerRes.error || adminRes.error) throw renterRes.error || ownerRes.error || adminRes.error;
 
         let userRole = 'renter';
         let profileData = renterRes.data;
@@ -135,16 +137,18 @@ export default function Profile() {
         setDorms(dormsData || []);
         setDormCount(totalDorms || 0);
         setEditedProfile(mergedProfile);
+        loadedProfileId.current = user.id;
 
       } catch (error) {
         console.error('Error loading profile:', error);
+        showError('Profile could not load', error instanceof Error ? error.message : 'Please try again.');
       } finally {
         setLoading(false);
       }
     };
 
     loadProfile();
-  }, [user]);
+  }, [user]));
 
   const handleSaveProfile = async () => {
     if (!user) return;
@@ -169,13 +173,14 @@ export default function Profile() {
         ? await uploadImage(`${user.id}/avatar/${Date.now()}.${getSafeImageExtension(avatarUri)}`, avatarUri)
         : editedProfile.avatar_url;
       // Update Supabase auth user metadata
-      await supabase.auth.updateUser({
+      const { error: metadataError } = await supabase.auth.updateUser({
         data: {
           full_name: fullName,
           username,
           avatar_url: avatarUrl,
         }
       });
+      if (metadataError) throw metadataError;
 
       // Determine the right table to update based on role
       const table = profile?.role === 'admin' ? 'admins' : profile?.role === 'owner' ? 'owners' : 'renters';
@@ -504,9 +509,28 @@ export default function Profile() {
       )}
 
       <View style={styles.signOutContainer}>
+        <View style={styles.accountActions}>
+          <Pressable accessibilityRole="button" style={styles.accountAction} onPress={() => router.push('/booking-history' as never)}>
+            <Ionicons name="calendar-outline" size={22} color={AppColors.accent} />
+            <Text style={styles.accountActionText}>Bookings & history</Text>
+            <Ionicons name="chevron-forward" size={18} color={AppColors.textSecondary} />
+          </Pressable>
+          {(profile?.role === 'owner' || profile?.role === 'admin') && <Pressable accessibilityRole="button" style={styles.accountAction} onPress={() => router.push('/tenant-history' as never)}>
+            <Ionicons name="people-outline" size={22} color={AppColors.accent} />
+            <Text style={styles.accountActionText}>Past tenants</Text>
+            <Ionicons name="chevron-forward" size={18} color={AppColors.textSecondary} />
+          </Pressable>}
+          <Pressable accessibilityRole="button" style={styles.accountAction} onPress={() => router.push('/support' as never)}>
+            <Ionicons name="help-buoy-outline" size={22} color={AppColors.accent} />
+            <Text style={styles.accountActionText}>Report an issue & my tickets</Text>
+            <Ionicons name="chevron-forward" size={18} color={AppColors.textSecondary} />
+          </Pressable>
+        </View>
         <View style={styles.profileLinks}>
           <Pressable style={styles.profileLink} onPress={() => router.push('/chat')}><MaterialCommunityIcons name="robot-happy-outline" size={29} color={AppColors.accent} /><Text style={styles.profileLinkText}>Dorm Assistant</Text></Pressable>
+          {/* Hidden for now; keep the Settings route and shortcut ready to restore.
           <Pressable style={styles.profileLink} onPress={() => router.push('/(tabs)/settings')}><Ionicons name="settings-outline" size={26} color={AppColors.accent} /><Text style={styles.profileLinkText}>Settings</Text></Pressable>
+          */}
           <Pressable style={styles.profileLink} onPress={() => router.push('/(tabs)/about-us')}><Ionicons name="information-circle-outline" size={26} color={AppColors.accent} /><Text style={styles.profileLinkText}>About SNAP</Text></Pressable>
         </View>
         {/* Notifications Button */}
@@ -545,7 +569,7 @@ export default function Profile() {
         onRequestClose={() => setPrefModalVisible(false)}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.modalContainer}>
+          <View style={[styles.modalContainer, { paddingBottom: Math.max(insets.bottom, 20) }]}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Dorm Preferences</Text>
               <Pressable style={styles.modalCloseButton} onPress={() => setPrefModalVisible(false)}>
@@ -601,7 +625,7 @@ export default function Profile() {
               >
                 <Ionicons name="map-outline" size={18} color={AppColors.accent} />
                 <Text style={styles.mapPickerToggleText}>
-                  {showMapPicker ? 'Hide Map View' : '📍 Choose Area on Map (Optional)'}
+                  {showMapPicker ? 'Hide map' : 'Choose area on map'}
                 </Text>
               </Pressable>
 
@@ -695,6 +719,9 @@ export default function Profile() {
 }
 
 const styles = StyleSheet.create({
+  accountActions: { marginBottom: 20, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: AppColors.borderSubtle },
+  accountAction: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 54, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: AppColors.borderSubtle },
+  accountActionText: { flex: 1, flexShrink: 1, color: AppColors.text, fontSize: 15, fontWeight: '500' },
   newActivityDot: { position: 'absolute', top: 3, right: 3, width: 7, height: 7, borderRadius: 4, backgroundColor: AppColors.error },
   container: {
     flex: 1,
@@ -877,6 +904,8 @@ const styles = StyleSheet.create({
   },
   sectionHeader: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 20,
@@ -936,8 +965,8 @@ const styles = StyleSheet.create({
     padding: 20,
     paddingBottom: 40,
   },
-  profileLinks: { flexDirection: 'row', justifyContent: 'center', gap: 10, marginBottom: 14 },
-  profileLink: { width: 92, minHeight: 76, alignItems: 'center', justifyContent: 'center', gap: 8, padding: 9 },
+  profileLinks: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, marginBottom: 14 },
+  profileLink: { flexBasis: 82, flexGrow: 1, maxWidth: 120, minHeight: 76, alignItems: 'center', justifyContent: 'center', gap: 8, padding: 8 },
   profileLinkText: { color: AppColors.text, fontSize: 10, fontWeight: '700', textAlign: 'center' },
   photoPicker: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 10, marginTop: 6, marginBottom: 12, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: AppColors.border, backgroundColor: AppColors.surfaceElevated },
   photoPickerImage: { width: 58, height: 58, borderRadius: 29 },

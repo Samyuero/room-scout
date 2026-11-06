@@ -1,11 +1,13 @@
 import { showError } from '@/components/error-toast';
 import { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, Linking, Pressable, Modal, TextInput, Alert, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Pressable, Modal, TextInput, Alert, ActivityIndicator } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppColors, BorderRadius } from '@/constants/theme';
 import { Image } from 'expo-image';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
+import { getErrorMessage } from '@/lib/logger';
+import { composeSnapEmail } from '@/lib/team-email';
 
 export default function AboutUs() {
   const insets = useSafeAreaInsets();
@@ -14,6 +16,7 @@ export default function AboutUs() {
   const [subject, setSubject] = useState('');
   const [description, setDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [openingEmail, setOpeningEmail] = useState(false);
   // Edit these four records to update the team section; no other files are required.
   const teamMembers = [
     { id: 1, name: 'Angel Faye A. Parba', role: 'Project Manager', bio: 'Responsible for overall project management and coordination.' },
@@ -22,19 +25,23 @@ export default function AboutUs() {
     { id: 4, name: 'Princess Reyna Joy P. Regidor', role: 'Quality Assurance', bio: 'Ensured the quality and reliability of the application through testing.' },
   ];
 
-  const openLink = async (url: string) => {
+  const emailUs = async () => {
+    if (openingEmail) return;
+    setOpeningEmail(true);
     try {
-      await Linking.openURL(url);
-    } catch (e) {
-      console.error('Error opening URL:', e);
+      await composeSnapEmail();
+    } catch (error) {
+      showError('Email app unavailable', getErrorMessage(error, 'Please open Gmail and contact the SNAP team.'));
+    } finally {
+      setOpeningEmail(false);
     }
   };
 
   const submitReport = async () => {
     const safeSubject = subject.trim().slice(0, 120);
     const safeDescription = description.trim().slice(0, 2000);
-    if (!safeSubject || !safeDescription) {
-      Alert.alert('Add details', 'Please provide a short subject and a description of the issue.');
+    if (safeSubject.length < 3 || safeDescription.length < 5) {
+      Alert.alert('Add details', 'Use at least 3 characters for the subject and 5 for the description.');
       return;
     }
     if (!user) {
@@ -44,11 +51,7 @@ export default function AboutUs() {
 
     setSubmitting(true);
     try {
-      const { error } = await supabase.from('support_tickets').insert({
-        user_id: user.id,
-        subject: safeSubject,
-        description: safeDescription,
-      });
+      const { error } = await supabase.rpc('create_support_ticket', { p_subject: safeSubject, p_description: safeDescription });
       if (error) throw error;
       setReportVisible(false);
       setSubject('');
@@ -56,7 +59,7 @@ export default function AboutUs() {
       Alert.alert('Report sent', 'Thank you. The SNAP team can now review your report in the admin panel.');
     } catch (error) {
       console.error('Support ticket submission failed:', error);
-      showError('Could not send report', 'Please check your connection and try again.');
+      showError('Could not send report', getErrorMessage(error, 'Please check your connection and try again.'));
     } finally {
       setSubmitting(false);
     }
@@ -104,12 +107,14 @@ export default function AboutUs() {
         <Text style={styles.description}>Have questions or feedback? We&apos;d love to hear from you!</Text>
 
         <View style={styles.buttonContainer}>
-          <Pressable style={styles.linkButton} onPress={() => openLink('mailto:snap@uclm.edu')}>
-            <Text style={styles.linkButtonText}>Email Us</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel="Email the SNAP team" accessibilityState={{ disabled: openingEmail, busy: openingEmail }} disabled={openingEmail} style={({ pressed }) => [styles.linkButton, (pressed || openingEmail) && { opacity: 0.7 }]} onPress={() => void emailUs()}>
+            {openingEmail ? <ActivityIndicator color={AppColors.accent} /> : <Text style={styles.linkButtonText}>Email Us</Text>}
           </Pressable>
-          <Pressable style={styles.linkButton} onPress={() => openLink('https://snap.uclm.edu')}>
+          {/* Website shortcut is hidden until the team's website is ready.
+          <Pressable style={styles.linkButton} onPress={() => Linking.openURL('https://snap.uclm.edu')}>
             <Text style={styles.linkButtonText}>Visit Website</Text>
           </Pressable>
+          */}
           <Pressable style={styles.linkButton} onPress={() => setReportVisible(true)}>
             <Text style={styles.linkButtonText}>Report Issue</Text>
           </Pressable>

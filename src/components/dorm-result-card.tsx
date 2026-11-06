@@ -34,13 +34,13 @@ export function DormResultCard({ dorm, onPress, compared, onCompare, compact = f
       onPress={onPress}
       style={({ pressed }) => [styles.card, !dorm.available && styles.unavailableCard, pressed && styles.pressed]}
     >
-      <Image
-        source={dorm.images[0] ? { uri: dorm.images[0] } : require('../../assets/placeholder.jpg')}
+      {dorm.images[0] ? <Image
+        source={{ uri: dorm.images[0] }}
         style={[styles.image, compact && styles.compactImage]}
         contentFit="cover"
         transition={180}
-      />
-      {!dorm.available && <View pointerEvents="none" style={styles.unavailableOverlay} />}
+      /> : <View style={[styles.image,compact && styles.compactImage,styles.imagePlaceholder]}><Ionicons name="bed-outline" size={34} color={AppColors.textMuted} /><Text style={styles.placeholderLabel}>Dormitory photos</Text></View>}
+      {!dorm.available && <View pointerEvents="none" style={[styles.unavailableOverlay, compact && styles.compactImage]} />}
       {dorm.lgu_certified && <Pressable accessibilityLabel="LGU certification information" onPress={(event) => { event.stopPropagation(); Alert.alert('LGU certified', 'This listing has been marked as LGU certified by a RoomScout administrator.'); }} style={styles.certificationRibbon}><Ionicons name="ribbon" size={27} color={AppColors.accent} /></Pressable>}
       <View style={styles.content}>
         <View style={styles.titleRow}>
@@ -66,7 +66,7 @@ export function DormResultCard({ dorm, onPress, compared, onCompare, compact = f
         <View style={styles.footer}>
           <View style={styles.tags}>
             <Text style={[styles.tag, { color: statusColor, borderColor: statusColor }]}>
-              {dorm.available && dorm.available_slots > 0 ? `${dorm.available_slots} left` : 'Unavailable'}
+              {dorm.available && dorm.available_slots > 0 ? `${dorm.available_slots} left` : availability === 'reserved' ? 'Reserved' : 'Unavailable'}
             </Text>
             {dorm.distance_km !== null && <Text style={styles.tag}>{dorm.distance_km} km</Text>}
             {isNewListing && <Text style={[styles.tag, styles.newTag]}>New</Text>}
@@ -106,10 +106,12 @@ const styles = StyleSheet.create({
   },
   pressed: { opacity: 0.86 },
   image: { width: '100%', height: 164, backgroundColor: AppColors.surfaceElevated },
+  imagePlaceholder: { alignItems: 'center', justifyContent: 'center', gap: 8 },
+  placeholderLabel: { color: AppColors.textMuted, fontSize: 12 },
   compactImage: { height: 110 },
   content: { padding: 14, gap: 10 },
   titleRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
-  titleCopy: { flex: 1 },
+  titleCopy: { flex: 1, minWidth: 0 },
   name: { color: AppColors.text, fontSize: 18, fontWeight: '700' },
   address: { color: AppColors.textSecondary, fontSize: 13, marginTop: 3 },
   scoreBadge: {
@@ -122,10 +124,10 @@ const styles = StyleSheet.create({
   },
   score: { color: AppColors.white, fontSize: 16, fontWeight: '800', fontVariant: ['tabular-nums'] },
   scoreLabel: { color: '#DBEAFE', fontSize: 8, textTransform: 'uppercase' },
-  metrics: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  price: { color: AppColors.accent, fontSize: 16, fontWeight: '700' },
+  metrics: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, justifyContent: 'space-between', alignItems: 'center' },
+  price: { color: AppColors.accent, flexShrink: 1, fontSize: 16, fontWeight: '700' },
   perMonth: { color: AppColors.textMuted, fontSize: 11, fontWeight: '500' },
-  rating: { color: AppColors.warning, fontSize: 13, fontWeight: '600' },
+  rating: { color: AppColors.warning, flexShrink: 1, fontSize: 13, fontWeight: '600' },
   footer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   tags: { flex: 1, flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   tag: {

@@ -1,5 +1,7 @@
 # Room Scout
 
+Latest discovery polish: see [November 7 search, demand areas and SNAP notices](docs/NOVEMBER_7_SEARCH_AND_DEMAND.md).
+
 Room Scout is an Android-first Expo SDK 57 dorm finder for the SNAP team. The app uses Supabase for authentication/data/realtime and Leaflet with OpenStreetMap for its main discovery map. It can run with cached demo/UI states while unfinished, but production transactions require the supplied Supabase migrations and private document storage.
 
 ## Included now
@@ -8,8 +10,11 @@ Room Scout is an Android-first Expo SDK 57 dorm finder for the SNAP team. The ap
 - Home, Search, Leaflet Map/price analytics, Compare, Profile, About SNAP, notifications and local dorm-assistant UI
 - Cache-first dorm loading, preloading, realtime refresh and optimistic comparison
 - Reviews with photos, ratings, and a verified-renter badge while exposing only a limited public reviewer display
-- Owner listing proof and admin approval UI
-- Rental/reservation request, owner acceptance/QR, payment proof and admin verification states
+- Verified-owner listings publish instantly; LGU proof still requires admin approval
+- School-centered Leaflet search, strict filter matches, separate AI-ranked alternatives and featured dormitories
+- Gemini-assisted 30-day demand forecasts using pooled booking history and sourced Philippine student-housing context; circular geographic-area/viewport price analytics
+- Rental/reservation, owner-confirmed cash/QR payments, reservation conversion, 90% refund evidence and history
+- Profile booking/tenant history, support conversations, admin account moderation and read-only payment history
 - Structured JSON logs and database-generated notification/audit paths
 
 ## Local setup
@@ -90,7 +95,7 @@ The `20261103181120_signup_identity_and_self_rental_guards.sql` migration is app
 
 Do not deploy `schema_v2.sql` alone: the last migration removes unsafe self-admin policies, restricts private profiles and system logs, validates state transitions, protects listing approval fields, creates storage limits, and provides atomic payment verification.
 
-In Supabase Authentication, enable email confirmation. For Google sign-in, configure the Google provider and allow the native `roomscout://google-auth` redirect and your web `/auth/callback` URL. Put privileged AI/payment operations in a Supabase Edge Function; never ship provider secrets in `EXPO_PUBLIC_*` variables.
+In Supabase Authentication, enable email confirmation. For Google sign-in, configure the Google provider and allow the native `roomscout://google-auth` redirect and your web `/auth/callback` URL. AI calls use an authenticated Edge Function; payment/capacity changes use guarded atomic database RPCs. Never ship provider secrets in `EXPO_PUBLIC_*` variables.
 
 ## APK
 
@@ -117,7 +122,7 @@ For a fully local native build, install the Android SDK/JDK and run `npx expo ru
 
 `supabase/functions/dorm-assistant/index.ts` is the authenticated Gemini gateway. It sends only approved public listing fields, the signed-in renter's own preferences, and a redacted current message. `src/lib/dorm-assistant.ts` remains the deterministic local fallback, so dorm recommendations still work if the free Gemini quota is unavailable. Never send government IDs, payment proofs, emails, OTPs, reviewer identities, search history, or other users' preferences to a model.
 
-The gateway also enforces a server-side quota per signed-in account: 8 AI requests per 10 minutes and 40 per UTC day. Invalid requests and local fallback recommendations do not consume Gemini quota. Apply the latest migration in `supabase/migrations` before deploying the function.
+The gateway enforces 8 AI requests per 10 minutes and 40 per UTC day per account, plus a shared project budget of 5 upstream requests per minute and 150 per day. Search AI reranking is debounced and cached for 15 minutes; immediate local alternatives remain usable when offline or rate limited. Only rounded distances, not the selected origin coordinates, are sent to Gemini. Apply all migrations before deploying the function.
 
 ## Main file map
 
@@ -143,13 +148,13 @@ Before real users, run the migrations in a staging project, test every RLS and p
 
 Home uses the Search tab for searching. Dorm details separate price/rating, reservation fee, room type and remaining slots from house features. Tap listing or review photos to open the image viewer; swipe between photos and use the dots to see your position.
 
-A renter chooses rental/reservation and QR/cash in the fixed-height request form, previews their government ID, and can send a message. Cash and QR requests can be cancelled while pending, accepted, awaiting payment, under receipt review, or after payment confirmation. The confirmation explains that RoomScout does not send/refund money: any payment remains with the owner unless renter and owner arrange a return directly outside this app. Cancelling a confirmed stay releases its tenant slot and ends its active tenancy; cancelling an unpaid request does not change capacity.
+A renter chooses rental/reservation and QR/cash in the request form, previews their government ID, and can send a message. Unpaid requests can be withdrawn after a confirmation, including an uploaded receipt still awaiting review. A confirmed paid booking uses **Cancel & request refund** in Profile → Bookings & history: record GCash name/number/QR, a 90% refund and 10% deduction, owner transfer proof, and renter receipt confirmation. RoomScout records evidence; it does not transfer money. A held slot is released exactly once on receipt confirmation, unless the owner explicitly releases the reservation sooner.
 
-The shared backend has `20261103184351_unpaid_request_cancellation.sql` and `20261103184938_rental_capacity_guards.sql` applied. Cancellation locks the request, preserves receipts/payment history, notifies both participants, and safely tolerates retries. A receipt submitted before cancellation remains in the admin payment queue. Its review cannot reopen the cancelled request or allocate a slot. Unique indexes stop duplicate open requests and duplicate active tenancies for the same renter/dorm. Owners can see cancelled requests in their request history. Existing reservation-refund RPCs remain for legacy records, but the current cancellation action does not initiate an in-app refund.
+The November 6 migrations supersede the older cancellation-only flow. Owners confirm or reject QR receipts, including a receipt attached before withdrawal. Reviewing a withdrawn receipt cannot reopen the booking or allocate a bed. Admins see searchable, filterable payment history and related support reports, but cannot confirm payments. Unique indexes and locked workflow functions protect capacity and prevent duplicate open bookings. Owner Requests, Reserved, Tenants and History keep every stage reachable.
 
-`npm run test:rental-workflow` checks the UI eligibility and confirmation wiring. `supabase/tests/rental_workflow.sql` exercises cash/QR rental/reservation transitions, paid and unpaid cancellations, receipt review after withdrawal, capacity protection, retry safety and authenticated RLS/tampering checks. It uses synthetic fixtures inside a rolled-back transaction; it does not transfer money or leave test accounts/listings behind. These checks do not replace a physical Android APK walkthrough.
+`npm run test:rental-workflow` checks eligibility and confirmation wiring. The current SQL suites are `supabase/tests/rental_completion.sql` and `supabase/tests/admin_support_security.sql`; both use rolled-back fixtures and leave no test users, listings or documents. The older `rental_workflow.sql` documents the pre-November-6 cancellation policy and is not the current refund suite. These checks do not replace a physical Android APK walkthrough.
 
-For QR payment, the owner sends the required amount, QR image and contract. The renter reviews the contract and uploads proof of payment; admin verification confirms the transaction and updates capacity. For cash in person, owner acceptance creates a **Pending cash payment** request. After receiving the cash, the owner confirms receipt; an atomic database function updates capacity and adds a rental to Tenants. A reservation instead records the reserved slot.
+For QR payment, the owner sends the required amount, QR image and contract. The renter reviews the contract and uploads proof; the **owner** verifies actual receipt and confirms the booking. For cash, owner acceptance creates **Pending cash payment**; owner confirmation after receiving cash records the stay. Each confirmed request allocates one bed atomically. A paid reservation stays in Reserved and can be converted to tenancy without allocating a second bed.
 
 Owner requests start as compact, expandable rows. Expanding a request loads its protected ID and payment-proof previews. Tap a preview for a clearer protected view.
 
@@ -157,7 +162,7 @@ The root NotificationProvider preloads notifications and owner action counts aft
 
 Existing databases need all current `supabase/migrations` files, including the November 2 profile-integrity and cash-workflow updates. These also repair missing renter identities for owner/admin accounts, retain cancelled request history, and add optional phone numbers to renter, owner and admin profiles.
 
-Government IDs are opened in the owner-only `app/view-id.tsx` screen. It enables Android screenshot/recording protection before loading a short-lived private image, disables image caching, and provides no export action. Rebuild the APK after installing `expo-screen-capture`; older installed builds show an update message for protected viewing. External cameras and compromised devices cannot be prevented from copying displayed information.
+Government IDs use protected owner/admin viewers with Android screenshot/recording protection, short-lived signed URLs, no image cache and no export action. Admin owner-verification approval requires loading the document preview first. Rebuild the APK after native dependency changes. External cameras and compromised devices cannot be prevented from copying displayed information.
 
 The SNAP greeting appears once for five seconds and stays dismissed on later Home visits. Home includes unavailable listings with a dimmed appearance. Profile indicators follow unread notifications and clear when notifications are read.
 
@@ -176,5 +181,9 @@ Run `npm run test:account-registration` and `npm run check-secrets` before shari
 - Sign-up has two steps: name/unique username/account type, then email/optional phone/password confirmation. Profile contact numbers prefill empty listing contact fields; listing phones are optional. Own-listing rental controls are derived from the current signed-in user, and the signup migration adds a database self-rental constraint.
 - Profile preferences include a custom positive search radius, budget/location, amenities, utilities, house rules, gender policy, room type, curfew, parking, pets, furnishing and LGU certification. Each preference is optional and is stored in the signed-in account's `renters.behavior_preferences` JSON. This baseline identity also exists for owner/admin accounts; it does not change their role.
 - Choosing a preference-map pin saves coordinates directly. A reverse-geocoding service is not required; the area label can be edited.
-- Search ranks matching listings first and recommends remaining listings afterward rather than hiding every listing when preferences do not match.
-- Demand estimates use a frozen listing snapshot for each activation and a 10-minute in-memory cache keyed by listing capacity/availability facts. Realtime listing updates do not rerun an active prediction. High, moderate and steady use red, yellow and green consistently. Estimates are guidance, not guaranteed occupancy forecasts.
+- Search has strict **Matches** and a separate **Recommended for you** section. Alternatives never count as matches. With no requested filters/profile preferences, ratings determine the alternative order; otherwise Gemini can refine the local shortlist with a rate-limited, cached request.
+- Maps can use UCLM or a searched school/place as a clearly labeled origin without claiming that it is the phone's GPS location. Green covers the inner 70% of the displayed radius, blue the remaining inside edge, and red the outside. Enabling the strict distance filter hides outside pins. Home no longer has a nearby-search control.
+- Maps has Clear location and Reset map. Locate clears stale search filters; failed GPS falls back to a labeled default Opao radius without hiding outside pins. Demand pins use Low/Moderate/High and include an average index across the forecasted dorms. Featured entries hide while unavailable and return automatically when available. Owner dorm filtering uses a dark searchable selector; past tenants explicitly identify their previous dorm.
+- Price mode aggregates monthly rents into geographic areas shown as circles; its visible average uses actual viewport bounds. Demand combines recent per-listing activity, pooled all-listing history and 12 monthly windows with Gemini's sourced Philippine student-housing context for a next-30-day estimate. New dorms use a pooled prior; forecasts are not guaranteed occupancy or a nationwide rental dataset. High/moderate/steady use red/yellow/green consistently. Each activation uses a fixed snapshot cached for 10 minutes, with a history-based fallback if Gemini is unavailable.
+
+See [November 6 changes and test checklist](docs/NOVEMBER_6_UPDATE.md) for screen locations, database changes, current limitations and survey checks.

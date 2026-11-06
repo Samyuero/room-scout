@@ -1,13 +1,17 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Image } from 'expo-image';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Keyboard, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { FilterSheet } from '@/components/filter-sheet';
-import { AppColors } from '@/constants/theme';
+import { ErrorToast } from '@/components/error-toast';
+import { AppColors, BorderRadius } from '@/constants/theme';
 import { useDiscovery } from '@/context/discovery-context';
 import { supabase } from '@/lib/supabase';
-import type { DormFilters } from '@/types/dorm';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { matchesDormQuery } from '@/lib/dorm-discovery';
+import type { Dorm, DormFilters } from '@/types/dorm';
 
 interface SearchBarProps {
   onPress: () => void;
@@ -36,12 +40,14 @@ export function DiscoverySearchBar({ onPress, onFilterPress, value, placeholder 
 interface SearchSheetProps {
   visible: boolean;
   onClose: () => void;
-  onApplied?: () => void;
+  onApplied?: (filters: DormFilters) => void;
   openFiltersInitially?: boolean;
 }
 
 export function DiscoverySearchSheet({ visible, onClose, onApplied, openFiltersInitially = false }: SearchSheetProps) {
-  const { dorms, filters, setFilters, requestLocation, locationLoading } = useDiscovery();
+  const insets = useSafeAreaInsets();
+  const router = useRouter();
+  const { allRankedDorms, filters, setFilters, setHasSearched, requestLocation, locationLoading, setSearchOrigin } = useDiscovery();
   const [query, setQuery] = useState(filters.query);
   const [recent, setRecent] = useState<string[]>([]);
   const [filtersVisible, setFiltersVisible] = useState(false);
@@ -64,6 +70,7 @@ export function DiscoverySearchSheet({ visible, onClose, onApplied, openFiltersI
   useEffect(() => {
     if (!visible) return;
     setQuery(filters.query);
+    setRecent([]);
     setFiltersVisible(openFiltersInitially);
     void loadRecent();
   }, [filters.query, loadRecent, openFiltersInitially, visible]);
@@ -79,42 +86,41 @@ export function DiscoverySearchSheet({ visible, onClose, onApplied, openFiltersI
   function apply(nextFilters: DormFilters = { ...filters, query: query.trim() }, explicitQuery = query) {
     const safe = { ...nextFilters, query: explicitQuery.trim().slice(0, 100) };
     setFilters(safe);
-    void saveRecent(safe.query);
+    setHasSearched(true);
+    void saveRecent(safe.query).catch(() => { /* Search still works if recent queries cannot be saved. */ });
     setFiltersVisible(false);
     onClose();
-    onApplied?.();
+    onApplied?.(safe);
   }
 
   async function nearMe() {
     await requestLocation();
+    setSearchOrigin(null);
     setQuery('Near me');
-    setFilters({ ...filters, query: '' });
+    const next = { ...filters, query: '', radiusEnabled: true };
+    setFilters(next);
+    setHasSearched(true);
     onClose();
-    onApplied?.();
+    onApplied?.(next);
+  }
+
+  function openDorm(dorm: Dorm) {
+    Keyboard.dismiss();
+    void saveRecent(dorm.name).catch(() => { /* Opening a dorm does not depend on saving recent searches. */ });
+    setFiltersVisible(false);
+    onClose();
+    router.push({ pathname: '/(tabs)/[dormId]', params: { dormId: dorm.dorm_id } });
   }
 
   const suggestions = useMemo(() => {
-    const clean = query.trim().toLowerCase();
-    const source = clean
-      ? dorms.filter((dorm) => `${dorm.name} ${dorm.address} ${(dorm.amenities || []).join(' ')}`.toLowerCase().includes(clean))
-      : dorms;
-    return [...source]
-      .sort((a, b) => {
-        const aAvail = a.available && a.available_slots > 0 ? 1 : 0;
-        const bAvail = b.available && b.available_slots > 0 ? 1 : 0;
-        if (aAvail !== bAvail) return bAvail - aAvail;
-        return (b.ranking_score || 0) - (a.ranking_score || 0);
-      })
-      .slice(0, 6);
-  }, [dorms, query]);
+    return allRankedDorms.filter((dorm) => dorm.available && dorm.available_slots > 0 && dorm.availability_status === 'available' && matchesDormQuery(dorm, query))
+      .slice(0, query.trim() ? 6 : 2);
+  }, [allRankedDorms, query]);
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <View style={styles.sheetPage}>
-        <View style={styles.sheetHeader}>
-          <Pressable accessibilityLabel="Close search" onPress={onClose} style={styles.roundButton}>
-            <Ionicons name="chevron-back" size={22} color={AppColors.text} />
-          </Pressable>
+        <View style={[styles.sheetHeader, { paddingTop: Math.max(16, insets.top) }]}>
           <View style={styles.inputShell}>
             <Ionicons name="search" size={18} color={AppColors.textMuted} />
             <TextInput
@@ -131,6 +137,9 @@ export function DiscoverySearchSheet({ visible, onClose, onApplied, openFiltersI
               <Ionicons name="options-outline" size={23} color={AppColors.text} />
             </Pressable>
           </View>
+          <Pressable accessibilityLabel="Close search" onPress={onClose} style={({ pressed }) => [styles.closeAction, pressed && styles.pressed]}>
+            <Text style={styles.closeText}>Close</Text>
+          </Pressable>
         </View>
 
         <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={styles.sheetContent} keyboardShouldPersistTaps="handled">
@@ -155,19 +164,21 @@ export function DiscoverySearchSheet({ visible, onClose, onApplied, openFiltersI
           <View style={styles.group}>
             <View style={styles.groupHeader}><Text style={styles.groupTitle}>Dorm suggestions</Text><Text style={styles.privateNote}>Public listings</Text></View>
             {suggestions.map((dorm) => (
-              <Pressable key={dorm.dorm_id} onPress={() => { setQuery(dorm.name); apply({ ...filters, query: dorm.name }, dorm.name); }} style={styles.suggestion}>
+              <Pressable key={dorm.dorm_id} accessibilityRole="button" accessibilityLabel={`View ${dorm.name}`} onPress={() => openDorm(dorm)} style={styles.suggestion}>
                 <Image source={dorm.images[0] ? { uri: dorm.images[0] } : require('../../assets/placeholder.jpg')} contentFit="cover" style={styles.thumbnail} />
                 <View style={{ flex: 1 }}><Text numberOfLines={1} style={styles.itemTitle}>{dorm.name}</Text><Text numberOfLines={1} style={styles.itemSubtitle}>{dorm.address}</Text></View>
                 <Ionicons name="arrow-up-outline" size={17} color={AppColors.textMuted} style={{ transform: [{ rotate: '45deg' }] }} />
               </Pressable>
             ))}
+            {suggestions.length === 0 && <Text style={styles.itemSubtitle}>No available dorm suggestions for this search.</Text>}
           </View>
         </ScrollView>
 
-        <View style={styles.bottomAction}>
-          <Pressable onPress={() => apply()} style={styles.applySearch}><Text style={styles.applySearchText}>Show matching dorms</Text></Pressable>
+        <View style={[styles.bottomAction, { paddingBottom: Math.max(16, insets.bottom) }]}>
+          <Pressable accessibilityRole="button" onPress={() => apply()} style={({ pressed }) => [styles.applySearch, pressed && styles.pressed]}><Text style={styles.applySearchText}>Search dorms</Text></Pressable>
         </View>
         <FilterSheet visible={filtersVisible} filters={filters} onClose={() => setFiltersVisible(false)} onApply={apply} />
+        <ErrorToast />
       </View>
     </Modal>
   );
@@ -180,7 +191,9 @@ const styles = StyleSheet.create({
   filterInside: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent' },
   sheetPage: { flex: 1, backgroundColor: AppColors.background },
   sheetHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, paddingTop: 16, paddingBottom: 12 },
-  roundButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: AppColors.surface },
+  closeAction: { minHeight: 44, paddingHorizontal: 16, paddingVertical: 10, borderRadius: BorderRadius.full, alignItems: 'center', justifyContent: 'center', backgroundColor: AppColors.surface },
+  closeText: { color: AppColors.accent, fontSize: 13, fontWeight: '700' },
+  pressed: { opacity: 0.7 },
   inputShell: { flex: 1, height: 52, flexDirection: 'row', alignItems: 'center', gap: 8, paddingLeft: 14, paddingRight: 5, borderRadius: 18, backgroundColor: AppColors.surface, borderWidth: 1, borderColor: AppColors.border },
   input: { flex: 1, height: 50, color: AppColors.text, fontSize: 14 },
   inputFilter: { width: 42, height: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 14, backgroundColor: 'transparent' },
@@ -188,7 +201,7 @@ const styles = StyleSheet.create({
   nearMeCard: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, borderRadius: 20, borderCurve: 'continuous', backgroundColor: AppColors.surface, borderWidth: 1, borderColor: AppColors.border },
   nearMeIcon: { width: 42, height: 42, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: AppColors.accent },
   group: { gap: 7 },
-  groupHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 2 },
+  groupHeader: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8, paddingHorizontal: 2 },
   groupTitle: { color: AppColors.text, fontSize: 17, fontWeight: '800' },
   privateNote: { color: AppColors.textMuted, fontSize: 10 },
   rowItem: { flexDirection: 'row', alignItems: 'center', gap: 11, minHeight: 46, paddingHorizontal: 12, borderRadius: 15, backgroundColor: AppColors.surface },
@@ -197,7 +210,7 @@ const styles = StyleSheet.create({
   thumbnail: { width: 58, height: 54, borderRadius: 14 },
   itemTitle: { color: AppColors.text, fontSize: 14, fontWeight: '700' },
   itemSubtitle: { color: AppColors.textMuted, fontSize: 11, paddingTop: 3 },
-  bottomAction: { position: 'absolute', left: 0, right: 0, bottom: 0, padding: 16, backgroundColor: AppColors.background, borderTopWidth: 1, borderTopColor: AppColors.borderSubtle },
-  applySearch: { height: 52, alignItems: 'center', justifyContent: 'center', borderRadius: 18, backgroundColor: AppColors.accent },
+  bottomAction: { position: 'absolute', left: 0, right: 0, bottom: 0, padding: 16, alignItems: 'flex-end', backgroundColor: AppColors.background, borderTopWidth: 1, borderTopColor: AppColors.borderSubtle },
+  applySearch: { minHeight: 48, paddingHorizontal: 24, paddingVertical: 12, alignItems: 'center', justifyContent: 'center', borderRadius: BorderRadius.full, backgroundColor: AppColors.accent },
   applySearchText: { color: AppColors.white, fontSize: 15, fontWeight: '800' },
 });

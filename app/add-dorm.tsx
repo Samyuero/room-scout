@@ -74,20 +74,22 @@ export default function AddDormScreen() {
   });
 
   useEffect(() => {
-    if (!dormId || !user?.id) return;
+    if (!dormId || !user?.id || checkingRole) return;
     void (async () => {
-      const { data, error: loadError } = await supabase.from('dorms').select('*').eq('dorm_id', dormId).eq('owner_id', user.id).single();
+      let query = supabase.from('dorms').select('*').eq('dorm_id', dormId);
+      if (userRole !== 'admin') query = query.eq('owner_id', user.id);
+      const { data, error: loadError } = await query.single();
       if (loadError || !data) { setError('Your listing could not be loaded.'); return; }
       setExistingImages(data.images || []);
       setExistingProof(data.ownership_proof_url || '');
       setOccupiedTenants(Number(data.occupied_tenants || 0));
       setLguCertified(Boolean(data.lgu_certified));
       setMapCenter({ latitude: data.latitude, longitude: data.longitude });
-      setForm((current) => ({ ...current, ...data, price: String(data.price), latitude: String(data.latitude), longitude: String(data.longitude), reservation_fee: String(data.reservation_fee || 0), max_tenants: String(data.max_tenants || 1), contact_phone: data.contact_phone || current.contact_phone || '', contact_email: data.contact_email || '' }));
+      setForm((current) => ({ ...current, ...data, price: String(data.price), latitude: String(data.latitude), longitude: String(data.longitude), reservation_fee: String(data.reservation_fee || 0), max_tenants: String(data.max_tenants || 1), contact_phone: data.contact_phone || (userRole === 'admin' ? '' : current.contact_phone) || '', contact_email: data.contact_email || '' }));
       const { data: certification } = await supabase.from('lgu_certification_requests').select('status').eq('dorm_id', dormId).maybeSingle();
       setLguStatus(certification?.status || '');
     })();
-  }, [dormId, user?.id]);
+  }, [dormId, user?.id, userRole, checkingRole]);
 
   useEffect(() => {
     if (isEditing) return;
@@ -135,7 +137,9 @@ export default function AddDormScreen() {
         return;
       }
       try {
-        // Check owners table first, then admins
+        const { data: administrator, error: adminError } = await supabase.from('admins').select('admin_id').eq('admin_id', user.id).maybeSingle();
+        if (adminError) throw adminError;
+        if (administrator) { setUserRole('admin'); return; }
         const { data: ownerData } = await supabase
           .from('owners')
           .select('owner_id, full_name, username, phone_number')
@@ -353,7 +357,7 @@ export default function AddDormScreen() {
         owner_display_name: (form.owner_display_name || 'Verified Owner').trim(),
         pet_friendly: form.pet_friendly,
         ownership_proof_url: ownershipProofUrl || null,
-        approval_status: 'pending',
+        approval_status: 'approved',
         available: form.available,
         images: uploadedUrls,
         owner_id: user.id,
@@ -365,8 +369,10 @@ export default function AddDormScreen() {
         delete fullPayload.owner_id;
         delete fullPayload.approval_status;
       }
-      const result = listingId
-        ? await supabase.from('dorms').update(fullPayload).eq('dorm_id', listingId).eq('owner_id', user.id).select('dorm_id').single()
+      let updateQuery = listingId ? supabase.from('dorms').update(fullPayload).eq('dorm_id', listingId) : null;
+      if (updateQuery && userRole !== 'admin') updateQuery = updateQuery.eq('owner_id', user.id);
+      const result = updateQuery
+        ? await updateQuery.select('dorm_id').single()
         : await supabase.from('dorms').insert(fullPayload).select('dorm_id').single();
       if (result.error) throw result.error;
       setSavedDormId(result.data.dorm_id);
@@ -376,7 +382,7 @@ export default function AddDormScreen() {
         if (certificationError) throw new Error('Your listing was saved, but LGU proof could not be submitted. ' + certificationError.message);
       }
       await refresh();
-      Alert.alert(isEditing ? 'Listing saved' : 'Listing submitted', requestLgu ? 'Your LGU proof is waiting for administrator review.' : isEditing ? 'Your changes are saved.' : 'An administrator will review your ownership proof.');
+      Alert.alert(isEditing ? 'Listing saved' : 'Listing published', requestLgu ? 'Your listing is visible now. The LGU badge will appear only after an administrator approves your proof.' : isEditing ? 'Your changes are saved.' : 'Your dormitory is now visible in RoomScout.');
       // Navigate back to home
       router.push('/(tabs)/home' as any);
 
@@ -580,7 +586,7 @@ export default function AddDormScreen() {
           <ThemedText type="smallBold" themeColor="text">{isEditing ? 'Proof of ownership' : 'Proof of ownership (required):'}</ThemedText>
           <Pressable style={styles.imageButton} onPress={pickOwnershipProof}><Text style={styles.imageButtonText}>{ownershipProofUri ? 'Change selected proof' : 'Choose proof image'}</Text></Pressable>
           {ownershipProofUri ? <Image source={{ uri: ownershipProofUri }} style={styles.proofPreview} /> : null}
-          <Text style={styles.mapHint}>{isEditing ? 'Your existing ownership proof is retained unless you replace it.' : 'The listing stays pending until an admin reviews this proof.'}</Text>
+          <Text style={styles.mapHint}>{isEditing ? 'Your existing ownership proof is retained unless you replace it.' : 'Ownership proof is stored privately. Your listing publishes immediately; LGU certification is reviewed separately.'}</Text>
         </ThemedView>
 
         <ThemedView style={styles.inputContainer}>
@@ -616,7 +622,7 @@ export default function AddDormScreen() {
 
         <ThemedView style={styles.inputContainer}>
           <ThemedText type="smallBold" themeColor="text">LGU certification</ThemedText>
-          {lguCertified ? <Text style={{ color: AppColors.success }}>LGU certified</Text> : <>
+          {lguCertified ? <Text style={{ color: AppColors.success }}>LGU certified</Text> : isEditing && userRole === 'admin' ? <Text style={styles.mapHint}>The owner submits certification proof. Review that proof in Admin → Listings.</Text> : <>
             <Text style={styles.mapHint}>{lguStatus === 'pending' ? 'Your certification proof is under review.' : lguStatus === 'rejected' ? 'The previous proof was declined. You can upload a corrected certificate.' : 'Submit a valid LGU certificate for administrator review.'}</Text>
             <Pressable onPress={() => setRequestLgu((value) => !value)} style={styles.choice}><Text style={styles.choiceText}>{requestLgu ? '✓ Request LGU certification' : 'Request LGU certification'}</Text></Pressable>
             {requestLgu && <Pressable style={styles.imageButton} onPress={async () => { const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8 }); if (!result.canceled) setLguProof(result.assets[0].uri); }}><Text style={styles.imageButtonText}>{lguProof ? 'Change certificate image' : 'Choose LGU certificate'}</Text></Pressable>}
@@ -624,7 +630,7 @@ export default function AddDormScreen() {
           </>}
         </ThemedView>
         <Button
-          title={loading ? 'Saving...' : isEditing ? 'Save Changes' : 'Submit Listing'}
+          title={loading ? 'Saving...' : isEditing ? 'Save Changes' : 'Publish Listing'}
           onPress={handleSubmit}
           disabled={loading || uploadingImages}
           color="#007aff"

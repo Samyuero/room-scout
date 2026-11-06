@@ -21,6 +21,7 @@ import {
   type DormFilters,
   type DormPreferences,
   type UserCoordinates,
+  type SearchOrigin,
 } from '@/types/dorm';
 
 
@@ -37,6 +38,8 @@ interface DiscoveryValue {
   rankedDorms: Dorm[];
   nearbyDorms: Dorm[];
   filters: DormFilters;
+  hasSearched: boolean;
+  setHasSearched: (searched: boolean) => void;
   setFilters: (filters: DormFilters) => void;
   resetFilters: () => void;
   loading: boolean;
@@ -46,12 +49,15 @@ interface DiscoveryValue {
   lastUpdated: string | null;
   refresh: () => Promise<void>;
   location: UserCoordinates | null;
+  searchOrigin: SearchOrigin | null;
+  searchLocation: UserCoordinates | null;
+  setSearchOrigin: (origin: SearchOrigin | null) => void;
   locationLoading: boolean;
   locationMessage: string | null;
   preferences: DormPreferences | null;
   hasPreferences: boolean;
   refreshPreferences: () => Promise<void>;
-  requestLocation: () => Promise<void>;
+  requestLocation: () => Promise<UserCoordinates | null>;
   compareIds: string[];
   comparedDorms: Dorm[];
   toggleCompare: (dormId: string) => CompareResult;
@@ -63,17 +69,21 @@ const DiscoveryContext = createContext<DiscoveryValue | null>(null);
 export function DiscoveryProvider({ children }: PropsWithChildren) {
   const [dorms, setDorms] = useState<Dorm[]>([]);
   const [filters, setFilters] = useState<DormFilters>(DEFAULT_DORM_FILTERS);
+  const [hasSearched, setHasSearched] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(supabaseConfigurationMessage);
   const [isUsingCachedData, setIsUsingCachedData] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [location, setLocation] = useState<UserCoordinates | null>(null);
+  const [searchOrigin, setSearchOrigin] = useState<SearchOrigin | null>(null);
   const [locationLoading, setLocationLoading] = useState(false);
   const [locationMessage, setLocationMessage] = useState<string | null>(null);
   const [preferences, setPreferences] = useState<DormPreferences | null>(null);
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const realtimeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const preferenceReadVersion = useRef(0);
+  const preferenceOwner = useRef<string | null>(null);
 
   const storeDorms = useCallback(async (nextDorms: Dorm[]) => {
     const now = Date.now();
@@ -127,6 +137,7 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
 
   const refreshPreferences = useCallback(async () => {
     if (!isSupabaseConfigured) return;
+    const version = ++preferenceReadVersion.current;
     const { data: authData } = await supabase.auth.getUser();
     const userId = authData.user?.id;
     if (!userId) {
@@ -142,7 +153,7 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
       logEvent('warn', 'preferences_read_failed', { message: getErrorMessage(preferenceError) });
       return;
     }
-    setPreferences((data?.behavior_preferences as DormPreferences | null) || null);
+    if (version === preferenceReadVersion.current) setPreferences((data?.behavior_preferences as DormPreferences | null) || null);
   }, []);
 
   useEffect(() => {
@@ -183,7 +194,15 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     void refreshPreferences();
-    const { data } = supabase.auth.onAuthStateChange(() => { setTimeout(() => void refreshPreferences(), 0); });
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      const nextId = session?.user.id || null;
+      if (preferenceOwner.current !== nextId) {
+        preferenceOwner.current = nextId; preferenceReadVersion.current += 1;
+        setPreferences(null); setFilters(DEFAULT_DORM_FILTERS); setSearchOrigin(null); setCompareIds([]); setHasSearched(false);
+        void AsyncStorage.removeItem(COMPARE_CACHE_KEY);
+      }
+      setTimeout(() => void refreshPreferences(), 0);
+    });
     return () => data.subscription.unsubscribe();
   }, [refreshPreferences]);
 
@@ -230,8 +249,9 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
     try {
       const permission = await Location.requestForegroundPermissionsAsync();
       if (permission.status !== 'granted') {
+        setLocation(null);
         setLocationMessage('Location is off. Search by area and price is still available.');
-        return;
+        return null;
       }
 
       let servicesEnabled = await Location.hasServicesEnabledAsync();
@@ -244,33 +264,39 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
         }
       }
       if (!servicesEnabled) {
+        setLocation(null);
         setLocationMessage('Turn on Location in Android settings, then tap Location again. The map remains centered on Opao.');
-        return;
+        return null;
       }
 
       const current = await Promise.race([
-        Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
+        Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }).catch(() => null),
         new Promise<null>((resolve) => setTimeout(() => resolve(null), 15000)),
       ]);
       const fallback = current || await Location.getLastKnownPositionAsync({ maxAge: 5 * 60 * 1000 });
       if (fallback?.coords && isPhilippinesCoordinates(fallback.coords)) {
-        setLocation({
+        const coordinates = {
           latitude: fallback.coords.latitude,
           longitude: fallback.coords.longitude,
           accuracy_m: fallback.coords.accuracy,
-        });
+        };
+        setLocation(coordinates);
         const accuracy = fallback.coords.accuracy ? ` (about ${Math.round(fallback.coords.accuracy)} m accuracy)` : '';
         setLocationMessage(`You are at ${fallback.coords.latitude.toFixed(5)}, ${fallback.coords.longitude.toFixed(5)}${accuracy}.`);
+        logEvent('info', 'nearby_ranking_enabled');
+        return coordinates;
       } else {
         setLocation(null);
         setLocationMessage('Current position is unavailable. The map is centered on Opao, Mandaue City—tap Location to retry.');
       }
-      logEvent('info', 'nearby_ranking_enabled');
+      return null;
     } catch (caught) {
+      setLocation(null);
       const message = getErrorMessage(caught, 'Could not get your location.');
       setLocationMessage(message);
       // A disabled GPS provider is a recoverable user state, not a red-screen application error.
       logEvent('warn', 'location_request_failed', { message });
+      return null;
     } finally {
       setLocationLoading(false);
     }
@@ -301,13 +327,14 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
     void AsyncStorage.removeItem(COMPARE_CACHE_KEY);
   }, []);
 
+  const searchLocation = searchOrigin || location;
   const allRankedDorms = useMemo(
-    () => rankDorms(dorms, filters, location, preferences),
-    [dorms, filters, location, preferences],
+    () => rankDorms(dorms, filters, searchLocation, preferences),
+    [dorms, filters, searchLocation, preferences],
   );
   const rankedDorms = useMemo(
-    () => filterAndRankDorms(dorms, filters, location, preferences),
-    [dorms, filters, location, preferences],
+    () => filters.radiusEnabled && !searchLocation ? [] : filterAndRankDorms(dorms, filters, searchLocation, preferences),
+    [dorms, filters, searchLocation, preferences],
   );
   const nearbyDorms = useMemo(
     () => rankDorms(
@@ -329,8 +356,10 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
     rankedDorms,
     nearbyDorms,
     filters,
+    hasSearched,
+    setHasSearched,
     setFilters,
-    resetFilters: () => setFilters(DEFAULT_DORM_FILTERS),
+    resetFilters: () => { setFilters(DEFAULT_DORM_FILTERS); setHasSearched(false); },
     loading,
     refreshing,
     error,
@@ -338,6 +367,9 @@ export function DiscoveryProvider({ children }: PropsWithChildren) {
     lastUpdated,
     refresh: () => fetchDorms(true),
     location,
+    searchOrigin,
+    searchLocation,
+    setSearchOrigin,
     locationLoading,
     locationMessage,
     preferences,

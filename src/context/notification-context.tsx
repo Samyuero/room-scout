@@ -11,6 +11,7 @@ interface NotificationValue {
   requestUnreadCount: number;
   tenantUnreadCount: number;
   profileBadgeCount: number;
+  ownerRequestIds: string[];
   refreshUnreadCount: () => Promise<void>;
   markAllRead: () => Promise<void>;
 }
@@ -22,21 +23,26 @@ export function NotificationProvider({ children }: PropsWithChildren) {
   const [notifications, setNotifications] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [pendingRequestIds, setPendingRequestIds] = useState<string[]>([]);
+  const [ownerRequestIds, setOwnerRequestIds] = useState<string[]>([]);
   const pendingRequestCount = pendingRequestIds.length;
   const requestVersion = useRef(0);
+  const currentUserId = useRef<string | null>(null);
   const unreadCount = notifications.filter((item) => !item.read).length;
 
   const refreshUnreadCount = useCallback(async () => {
     const version = ++requestVersion.current;
-    if (!userId) { setNotifications([]); setPendingRequestIds([]); setLoading(false); return; }
+    if (!userId) { setNotifications([]); setPendingRequestIds([]); setOwnerRequestIds([]); setLoading(false); return; }
     const [noticeResult, requestResult] = await Promise.all([
       supabase.from('notifications').select('*').eq('user_id', userId).order('created_at', { ascending: false }),
-      supabase.from('rental_requests').select('request_id').eq('owner_id', userId).in('status', ['pending', 'awaiting_cash', 'payment_submitted', 'refund_requested']),
+      supabase.from('rental_requests').select('request_id,status').eq('owner_id', userId),
     ]);
     if (version !== requestVersion.current) return;
     if (noticeResult.error || requestResult.error) logEvent('warn', 'notification_preload_failed', { message: getErrorMessage(noticeResult.error || requestResult.error) });
     if (!noticeResult.error) setNotifications(noticeResult.data || []);
-    if (!requestResult.error) setPendingRequestIds((requestResult.data || []).map((item) => item.request_id));
+    if (!requestResult.error) {
+      setOwnerRequestIds((requestResult.data || []).map((item) => item.request_id));
+      setPendingRequestIds((requestResult.data || []).filter((item) => ['pending','awaiting_cash','payment_submitted','refund_requested'].includes(item.status)).map((item) => item.request_id));
+    }
     setLoading(false);
   }, [userId]);
 
@@ -50,10 +56,18 @@ export function NotificationProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     let active = true;
-    supabase.auth.getSession().then(({ data }) => { if (active) setUserId(data.session?.user.id || null); });
+    const setIdentity = (nextId: string | null) => {
+      if (currentUserId.current !== nextId) {
+        setNotifications([]); setPendingRequestIds([]); setOwnerRequestIds([]); setLoading(Boolean(nextId));
+        currentUserId.current = nextId;
+      }
+      setUserId(nextId);
+    };
+    supabase.auth.getSession().then(({ data }) => { if (active) setIdentity(data.session?.user.id || null); });
     const { data } = supabase.auth.onAuthStateChange((_event, session) => {
       requestVersion.current += 1;
-      setUserId(session?.user.id || null);
+      const nextId = session?.user.id || null;
+      setIdentity(nextId);
     });
     return () => { active = false; data.subscription.unsubscribe(); };
   }, []);
@@ -72,7 +86,7 @@ export function NotificationProvider({ children }: PropsWithChildren) {
   const requestUnreadCount = notifications.filter((item) => !item.read && item.related_request_id && !['approved', 'reserved', 'rental_accepted', 'rental_ended', 'cancelled', 'refund_completed'].includes(item.type)).length;
   const tenantUnreadCount = notifications.filter((item) => !item.read && ['approved', 'reserved', 'rental_accepted', 'rental_ended', 'cancelled', 'refund_completed'].includes(item.type)).length;
   const profileBadgeCount = unreadCount;
-  return <NotificationContext.Provider value={{ notifications, loading, unreadCount, pendingRequestCount, requestUnreadCount, tenantUnreadCount, profileBadgeCount, refreshUnreadCount, markAllRead }}>{children}</NotificationContext.Provider>;
+  return <NotificationContext.Provider value={{ notifications, loading, unreadCount, pendingRequestCount, requestUnreadCount, tenantUnreadCount, profileBadgeCount, ownerRequestIds, refreshUnreadCount, markAllRead }}>{children}</NotificationContext.Provider>;
 }
 export function useNotifications() {
   const value = use(NotificationContext);
