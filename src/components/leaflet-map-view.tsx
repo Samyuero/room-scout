@@ -88,7 +88,7 @@ html,body,#map{width:100%;height:100%;margin:0;background:#111827}*{box-sizing:b
     data.markers.forEach(function(item){
       const icon=L.divIcon({className:'price-pin',html:'<span style="background:'+item.color+';--pin-color:'+item.color+'">'+item.label+'</span>',iconSize:[76,39],iconAnchor:[38,39]});
       const marker=L.marker([item.lat,item.lng],{icon:icon}).addTo(listingLayer);
-      marker.bindTooltip(plainText(item.name),{direction:'top'}).on('click',function(){post({type:'selectDorm',dormId:item.id})});
+      marker.on('click',function(){post({type:'selectDorm',dormId:item.id})});
     });
     if(data.picker){
       if(!pickerHint){pickerHint=L.control({position:'topleft'});pickerHint.onAdd=function(){const el=L.DomUtil.create('div');el.textContent='Drag the pin or tap map to set location';el.style.cssText='color:#111827;font:600 12px/18px system-ui;margin:0 32px 0 0;text-shadow:0 1px 2px white,0 -1px 2px white;pointer-events:none';return el};pickerHint.addTo(map)}

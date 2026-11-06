@@ -167,7 +167,7 @@ test('failed Locate resets stale filters and shows all pins around a labelled de
     allRankedDorms: [nearby, far],
     filters: { ...DEFAULT_DORM_FILTERS, query: 'impossible stale query', maxPrice: 1, radiusEnabled: true, radiusKm: 1 },
     location: { latitude: 10.7, longitude: 123.2 },
-    searchOrigin: null, hasPreferences: false, loading: false, refreshing: false, locationLoading: false, locationMessage: null,
+    searchOrigin: null, hasPreferences: false, loading: false, refreshing: false, locationLoading: false, locationMessage: 'You are at 10.40244, 123.96659 (about 20 m accuracy).',
     setFilters: (filters) => { context.filters = filters; }, setSearchOrigin: (origin) => { context.searchOrigin = origin; },
     setHasSearched: (searched) => { context.hasSearched = searched; },
     requestLocation: async () => { context.location = null; return null; }, refresh: async () => { refreshCount += 1; },
@@ -183,8 +183,9 @@ test('failed Locate resets stale filters and shows all pins around a labelled de
   const mocks = {
     react: { useState, useRef: (initial) => { const index = cursor++; if (index >= slots.length) slots.push({ current: initial }); return slots[index]; }, useMemo: (fn) => fn(), useCallback: (fn) => fn, useEffect: () => {} },
     'react/jsx-runtime': { jsx, jsxs: jsx },
-    'react-native': { ActivityIndicator: 'ActivityIndicator', Alert: { alert() {} }, Linking: { openURL: async () => {} }, Pressable: 'Pressable', ScrollView: 'ScrollView', StyleSheet: { create: (value) => value }, Text: 'Text', TextInput: 'TextInput', View: 'View', useWindowDimensions: () => ({ width: 360, height: 800, fontScale: 1 }) },
-    '@expo/vector-icons': { Ionicons: 'Icon' }, 'expo-router': { useRouter: () => ({ push() {} }), useLocalSearchParams: () => ({}) },
+    'react-native': { ActivityIndicator: 'ActivityIndicator', AppState: {}, Alert: { alert() {} }, Linking: { openURL: async () => {} }, Pressable: 'Pressable', ScrollView: 'ScrollView', StyleSheet: { create: (value) => value }, Text: 'Text', TextInput: 'TextInput', View: 'View', useWindowDimensions: () => ({ width: 360, height: 800, fontScale: 1 }) },
+    '@expo/vector-icons': { Ionicons: 'Icon' }, 'expo-router': { useFocusEffect: () => {}, useRouter: () => ({ push() {} }), useLocalSearchParams: () => ({}) },
+    '@/hooks/use-live-map-location': { useLiveMapLocation: () => ({ position: null, tracking: false, message: '' }) },
     'react-native-safe-area-context': { useSafeAreaInsets: () => ({ top: 0, bottom: 24 }) },
     '@/components/discovery-search': { DiscoverySearchBar: 'SearchBar', DiscoverySearchSheet: 'SearchSheet' },
     '@/components/error-toast': { showWarning() {} },
@@ -211,6 +212,7 @@ test('failed Locate resets stale filters and shows all pins around a labelled de
   const button = (label) => walk(tree, (node) => node.type === 'Pressable' && text(node) === label);
   const map = () => walk(tree, (node) => node.type === 'LeafletMapView').props;
   render();
+  assert.doesNotMatch(text(tree), /You are at|10\.40244/);
   assert.equal(map().dorms.length, 0);
   button('Locate me').props.onPress();
   await new Promise((resolve) => setImmediate(resolve));
@@ -224,6 +226,21 @@ test('failed Locate resets stale filters and shows all pins around a labelled de
   button('Demand').props.onPress(); await new Promise((resolve) => setImmediate(resolve)); render(); assert.equal(map().analyticsMode, 'demand'); assert.equal(map().dorms.length, 2);
   button('Clear location').props.onPress(); render(); assert.equal(map().anchor, undefined); assert.equal(map().userLocation, null); assert.equal(map().dorms.length, 2);
   button('Reset map').props.onPress(); await new Promise((resolve) => setImmediate(resolve)); render(); assert.equal(refreshCount, 1); assert.equal(map().dorms.length, 2);
+  map().onSelectDorm('nearby'); render();
+  assert.ok(button('View details'));
+  const toggle = () => walk(tree, (node) => node.props?.accessibilityLabel === 'Minimize dorm preview' || node.props?.accessibilityLabel === 'Expand dorm preview');
+  toggle().props.onPress(); render();
+  assert.equal(toggle().props.accessibilityState.expanded, false);
+  assert.equal(button('View details'), null);
+  assert.ok(walk(tree, (node) => node.props?.accessibilityLabel === 'Close dorm preview'));
+  toggle().props.onPress(); render(); assert.ok(button('View details'));
+  const price = button('Price');
+  assert.equal(price.props.style[0].alignItems, 'center');
+  assert.equal(price.props.style[0].justifyContent, 'center');
+  assert.equal(price.props.style[0].flexDirection, 'column');
+  const leaflet = readFileSync('src/components/leaflet-map-view.tsx', 'utf8');
+  assert.doesNotMatch(leaflet, /marker\.bindTooltip\(plainText\(item\.name\)/);
+  assert.match(leaflet, /marker\.on\('click'/);
 });
 
 test('demand area circles average forecasts inside their actual radius, not individual listing values', () => {

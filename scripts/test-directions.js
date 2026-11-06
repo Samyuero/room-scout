@@ -9,7 +9,7 @@ const fixture = { code: 'Ok', routes: [{ distance: 2500, duration: 420, geometry
 function load(fetch) {
   const module = { exports: {} };
   const code = ts.transpileModule(readFileSync('src/lib/directions.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  vm.runInNewContext(code, { module, exports: module.exports, require: () => ({ fetch }), AbortController, Date, setTimeout, clearTimeout, Map, Error, Number, Math });
+  vm.runInNewContext(code, { module, exports: module.exports, require: (name) => name === './dorm-discovery' ? { getDistanceKm: (a,b) => Math.abs(a.latitude-b.latitude)*111 } : { fetch }, AbortController, Date, setTimeout, clearTimeout, Map, Error, Number, Math });
   return module.exports;
 }
 test('road route sends only chosen coordinates in OSRM order and returns Leaflet points', async () => {
@@ -64,4 +64,12 @@ test('map preserves school origin on dorm focus and routes only after consent', 
   const leaflet = readFileSync('src/components/leaflet-map-view.tsx', 'utf8');
   assert.match(leaflet, /L\.polyline\(points/);
   assert.match(leaflet, /routeLayer\.clearLayers\(\)/);
+});
+test('live rerouting ignores GPS drift, poor accuracy and rapid requests', () => {
+  const { shouldRefreshLiveRoute } = load(async () => {});
+  const previous = { latitude: 10.32, longitude: 123.95 };
+  assert.equal(shouldRefreshLiveRoute(previous, { ...previous, latitude: 10.3205, accuracy_m: 10 }, 0, 16000), true);
+  assert.equal(shouldRefreshLiveRoute(previous, { ...previous, latitude: 10.32001, accuracy_m: 10 }, 0, 16000), false);
+  assert.equal(shouldRefreshLiveRoute(previous, { ...previous, latitude: 10.3205, accuracy_m: 150 }, 0, 16000), false);
+  assert.equal(shouldRefreshLiveRoute(previous, { ...previous, latitude: 10.3205, accuracy_m: 10 }, 0, 5000), false);
 });

@@ -1,5 +1,11 @@
 import { fetch } from 'expo/fetch';
 import type { UserCoordinates } from '../types/dorm';
+import { getDistanceKm } from './dorm-discovery';
+
+/** Ignore GPS drift; cap automatic routing to once per 15s after at least 25m of movement. */
+export function shouldRefreshLiveRoute(previous: UserCoordinates, current: UserCoordinates, lastAttempt: number, now = Date.now()) {
+  return Number.isFinite(current.accuracy_m) && Number(current.accuracy_m) <= 50 && Number(current.accuracy_m) >= 0 && now-lastAttempt >= 15000 && getDistanceKm(previous, current) >= 0.025;
+}
 
 export interface RoadRoute {
   coordinates: [number, number][]; // Leaflet order: latitude, longitude.
