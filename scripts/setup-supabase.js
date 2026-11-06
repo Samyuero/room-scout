@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 
-console.log('🚀 Setting up Supabase for Room Scout...');
+console.log('🚀 Setting up Supabase for RoomScout...');
 
 const rl = readline.createInterface({
   input: process.stdin,

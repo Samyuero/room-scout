@@ -1,11 +1,11 @@
-# Room Scout - Dorm Finder Application
+# RoomScout - Dorm Finder Application
 ## Project Summary
 
-This document provides an overview of the Room Scout application, a React Native Expo app for finding dormitories and apartments near universities.
+This document provides an overview of the RoomScout application, a React Native Expo app for finding dormitories and apartments near universities.
 
 ## 🎯 Application Overview
 
-Room Scout is a comprehensive dormitory and apartment finding application built with:
+RoomScout is a comprehensive dormitory and apartment finding application built with:
 - **React Native + Expo** for cross-platform mobile development
 - **Supabase** as the backend (PostgreSQL database, authentication, storage)
 - **Expo Router** for file-based navigation
@@ -271,4 +271,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**Ready to start finding your perfect home? Run `npm start` and begin your journey with Room Scout!**
+**Ready to start finding your perfect home? Run `npm start` and begin your journey with RoomScout!**

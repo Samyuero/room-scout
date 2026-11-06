@@ -1,11 +1,11 @@
-# Room Scout - Functional Decomposition
+# RoomScout - Functional Decomposition
 
-This document decomposes the features and modules of the **Room Scout** application based on user roles and future plan requirements.
+This document decomposes the features and modules of the **RoomScout** application based on user roles and future plan requirements.
 
 ```mermaid
 flowchart TD
     %% Main Title
-    Title["Room Scout: Mobile-Based Dormitory and Rental Finder Application
+    Title["RoomScout: Mobile-Based Dormitory and Rental Finder Application
     (Expo Android App with Supabase)"]
     style Title fill:#0f172a,stroke:#38bdf8,stroke-width:3px,color:#fff,font-weight:bold;
 

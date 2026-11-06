@@ -21,7 +21,7 @@ export function logEvent(
 export function getErrorMessage(error: unknown, fallback = 'Something went wrong') {
   const message = error instanceof Error && error.message ? error.message : fallback;
   if (/unknownhostexception|unable to resolve host|network request failed|fetch failed/i.test(message)) {
-    return 'Cannot reach Room Scout online. Check this device’s internet connection or DNS settings, then try again.';
+    return 'Cannot reach RoomScout online. Check this device’s internet connection or DNS settings, then try again.';
   }
   return message;
 }

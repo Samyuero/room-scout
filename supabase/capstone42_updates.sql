@@ -1,5 +1,5 @@
 -- ====================================================================
--- ROOM SCOUT: CAPSTONE 42 SCHEMA ADDITIONS & UPDATES
+-- RoomScout: CAPSTONE 42 SCHEMA ADDITIONS & UPDATES
 -- Run this script in your Supabase SQL Editor to apply database updates
 -- ====================================================================
 

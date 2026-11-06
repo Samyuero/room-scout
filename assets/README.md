@@ -1,6 +1,6 @@
 # Assets Directory
 
-This directory contains static assets used by the Room Scout application.
+This directory contains static assets used by the RoomScout application.
 
 ## Required Images
 

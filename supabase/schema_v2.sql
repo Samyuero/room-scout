@@ -1,5 +1,5 @@
 /********************************************************************
- * ROOM SCOUT DATABASE SCHEMA v2 (Separated Roles & Capstone 42 Features)
+ * RoomScout DATABASE SCHEMA v2 (Separated Roles & Capstone 42 Features)
  ********************************************************************/
 
 -- 1. EXTENSIONS

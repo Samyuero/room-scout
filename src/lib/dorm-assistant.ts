@@ -1,7 +1,7 @@
 import { filterAndRankDorms } from '@/lib/dorm-discovery';
 import type { Dorm, DormFilters, UserCoordinates } from '@/types/dorm';
 
-export const DORM_ASSISTANT_SYSTEM_PROMPT = `You are Room Scout's dorm-finding assistant.
+export const DORM_ASSISTANT_SYSTEM_PROMPT = `You are RoomScout's dorm-finding assistant.
 Use only the public dorm listing context supplied with the request.
 Never expose or infer another user's identity, location, government ID, payment proof, contact details, preferences, or transaction history.
 Do not invent availability, prices, amenities, certification, policies, reviews, or distances.

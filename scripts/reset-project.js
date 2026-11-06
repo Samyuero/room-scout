@@ -4,7 +4,7 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-console.log('🔄 Resetting Room Scout project...');
+console.log('🔄 Resetting RoomScout project...');
 
 try {
   // Remove node_modules

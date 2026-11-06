@@ -4,7 +4,7 @@ const { execFileSync } = require('node:child_process');
 const fs = require('fs');
 
 
-console.log('🔍 Verifying Room Scout setup...');
+console.log('🔍 Verifying RoomScout setup...');
 
 const errors = [];
 const warnings = [];

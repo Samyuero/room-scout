@@ -1,4 +1,4 @@
--- ROOM SCOUT SECURITY + TRANSACTION HARDENING
+-- RoomScout SECURITY + TRANSACTION HARDENING
 -- Apply after schema_v2.sql and capstone42_updates.sql.
 -- This migration is non-destructive and can be applied to an existing project.
 

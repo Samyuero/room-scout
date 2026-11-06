@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Room Scout",
+    "name": "RoomScout",
     "slug": "room-scout",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -31,14 +31,14 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Allow Room Scout to show your current position and nearby dormitories."
+          "locationWhenInUsePermission": "Allow RoomScout to show your current position and nearby dormitories."
         }
       ],
       [
         "expo-image-picker",
         {
-          "photosPermission": "Allow Room Scout to select dorm, profile, review, and verification photos.",
-          "cameraPermission": "Allow Room Scout to take dorm, profile, review, and verification photos.",
+          "photosPermission": "Allow RoomScout to select dorm, profile, review, and verification photos.",
+          "cameraPermission": "Allow RoomScout to take dorm, profile, review, and verification photos.",
           "microphonePermission": false
         }
       ],

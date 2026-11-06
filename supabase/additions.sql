@@ -1,5 +1,5 @@
 -- ====================================================================
--- ROOM SCOUT: DATABASE SCHEMA ADDITIONS
+-- RoomScout: DATABASE SCHEMA ADDITIONS
 -- Run this script in your Supabase SQL Editor to apply database additions
 -- ====================================================================
 

@@ -35,7 +35,7 @@ export default function Home() {
       >
         <View style={styles.brandHeader}>
           <Image source={require('../../assets/logo.png')} contentFit="contain" style={styles.logo} />
-          <Text style={styles.brandName}>Room Scout</Text>
+          <Text style={styles.brandName}>RoomScout</Text>
           <Text style={styles.brandTagline}>Find a place that feels right.</Text>
         </View>
 
