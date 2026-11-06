@@ -16,8 +16,9 @@ import { searchPlaces } from '@/lib/geocoding';
 import { getErrorMessage, logEvent } from '@/lib/logger';
 import { aggregateDemandAreas, aggregatePriceAreas, averageDemand, demandLabel, getAreaDemandSummary, getVisiblePriceSummary, historicalDemand, mapExplorationFilters, MAP_COLORS, type DemandContext, type MapBounds } from '@/lib/map-analytics';
 import { getAssistantQuotaWarning, predictDormDemand } from '@/lib/gemini-assistant';
+import { getRoadRoute, googleDirectionsUrl, type RoadRoute } from '@/lib/directions';
 import { supabase } from '@/lib/supabase';
-import type { Dorm, DormFilters, SearchOrigin } from '@/types/dorm';
+import type { Dorm, DormFilters, SearchOrigin, UserCoordinates } from '@/types/dorm';
 
 type Forecast = ReturnType<typeof historicalDemand>;
 export default function MapScreen() {
@@ -28,6 +29,12 @@ export default function MapScreen() {
   const { user } = useAuth();
   const params = useLocalSearchParams<{ dormId?: string; latitude?: string; longitude?: string; lat?: string; lng?: string }>();
   const [focusedDormId, setFocusedDormId] = useState<string | null>(null);
+  const [focusedPoint, setFocusedPoint] = useState<UserCoordinates | null>(null);
+  const [roadRoute, setRoadRoute] = useState<(RoadRoute & { dormId: string; startLabel: string }) | null>(null);
+  const [routeLoading, setRouteLoading] = useState(false);
+  const [routeError, setRouteError] = useState<string | null>(null);
+  const routeRequest = useRef<AbortController | null>(null);
+  const [previewHeight, setPreviewHeight] = useState(220);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mode, setMode] = useState<AnalyticsMode>('none');
   const [searchVisible, setSearchVisible] = useState(false);
@@ -54,7 +61,14 @@ export default function MapScreen() {
   useEffect(() => { demandSnapshot.current = null; setForecasts({}); setMode('none'); }, [user?.id]);
   const { allRankedDorms, filters, setFilters, setHasSearched, location, searchOrigin, setSearchOrigin, locationLoading, locationMessage, requestLocation, hasPreferences, loading, refreshing, refresh } = useDiscovery();
   const anchor = useMemo(() => searchOrigin || (browseWithoutOrigin ? null : useFallbackOrigin ? { ...OPAO_COORDINATES, label: 'Opao, Mandaue · default area', kind: 'default' } : location ? { ...location, label: 'Device location', kind: 'device' } : null), [searchOrigin, location, browseWithoutOrigin, useFallbackOrigin]);
-  const center = anchor || OPAO_COORDINATES;
+  const center = focusedPoint || anchor || OPAO_COORDINATES;
+  const routeOriginKey = `${anchor?.latitude}:${anchor?.longitude}:${anchor?.label}`;
+  const currentOrigin = useRef(routeOriginKey);
+  useEffect(() => {
+    currentOrigin.current = routeOriginKey;
+    routeRequest.current?.abort(); setRoadRoute(null); setRouteError(null); setRouteLoading(false);
+    return () => { routeRequest.current?.abort(); };
+  }, [routeOriginKey, selectedId, user?.id]);
   const radiusKm = filters.radiusEnabled ? filters.radiusKm : exploreRadius;
   const validDorms = useMemo(() => allRankedDorms.filter((dorm) => Number.isFinite(dorm.latitude) && Number.isFinite(dorm.longitude) && (dorm.dorm_id === focusedDormId || matchesDormFilters(dorm, filters, anchor))), [allRankedDorms, filters, anchor, focusedDormId]);
   const selected = validDorms.find((dorm) => dorm.dorm_id === selectedId) || null;
@@ -76,8 +90,8 @@ export default function MapScreen() {
     const latitude = dorm?.latitude ?? Number(params.latitude ?? params.lat);
     const longitude = dorm?.longitude ?? Number(params.longitude ?? params.lng);
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
-    setSearchOrigin({ latitude, longitude, label: dorm?.name || 'Selected dorm', kind: 'place' });
-    setBrowseWithoutOrigin(false); setUseFallbackOrigin(false); setFitAllDorms(false);
+    // Focusing a destination must not replace the selected campus/GPS route origin.
+    setFocusedPoint({ latitude, longitude }); setFitAllDorms(false);
     setFocusedDormId(String(params.dormId));
     setSelectedId(String(params.dormId));
     // A deep-link is a one-time navigation intent, not a subscription to subsequent filter edits.
@@ -91,6 +105,7 @@ export default function MapScreen() {
     setViewRevision((value) => value+1);
     setSearchOrigin(school);
     setFocusedDormId(null);
+    setFocusedPoint(null);
     setExploreRadius(radiusKm); setRadiusText(String(radiusKm));
     setFilters({ ...filters, query: '', radiusEnabled: false });
     setHasSearched(false);
@@ -107,9 +122,10 @@ export default function MapScreen() {
     setFitAllDorms(false); setUseFallbackOrigin(false); setBrowseWithoutOrigin(false);
     setSelectedId(null);
     setFocusedDormId(null);
+    setFocusedPoint(null);
     if (!next.query.trim()) return;
     const textMatch = allRankedDorms.find((dorm) => matchesDormFilters(dorm, { ...next, radiusEnabled: false }, null));
-    if (textMatch) { setSearchOrigin({ latitude: textMatch.latitude, longitude: textMatch.longitude, label: textMatch.name, kind: 'place' }); return; }
+    if (textMatch) { setFocusedPoint(textMatch); setFocusedDormId(textMatch.dorm_id); setSelectedId(textMatch.dorm_id); return; }
     const run = ++placeRun.current;
     setPlaceLoading(true);
     try {
@@ -174,6 +190,7 @@ export default function MapScreen() {
     placeRun.current += 1; predictionRun.current += 1;
     setPlaceLoading(false); setDemandLoading(false); setMode('none'); setNotice(null);
     setSelectedId(null); setFocusedDormId(null); setSearchOrigin(null);
+    setFocusedPoint(null);
     setBrowseWithoutOrigin(true); setUseFallbackOrigin(false); setFitAllDorms(true);
     setFilters(mapExplorationFilters(radiusKm)); setExploreRadius(radiusKm); setRadiusText(String(radiusKm));
     setHasSearched(false);
@@ -184,6 +201,7 @@ export default function MapScreen() {
     predictionRun.current += 1;
     setPlaceLoading(false); setDemandLoading(false); setMode('none');
     setFocusedDormId(null); setSelectedId(null); setSearchOrigin(null);
+    setFocusedPoint(null);
     setBrowseWithoutOrigin(false); setUseFallbackOrigin(false); setFitAllDorms(true);
     setFilters(mapExplorationFilters(radiusKm)); setExploreRadius(radiusKm); setRadiusText(String(radiusKm));
     setHasSearched(false);
@@ -199,14 +217,36 @@ export default function MapScreen() {
     setBounds(null); setMapRevision((value) => value+1);
     await refresh();
   }
-  async function openDirections(dorm: Dorm) {
-    try { await Linking.openURL(`https://www.openstreetmap.org/directions?to=${dorm.latitude}%2C${dorm.longitude}`); }
-    catch (caught) { Alert.alert('Directions unavailable', getErrorMessage(caught)); }
+  async function loadDirections(dorm: Dorm, start: NonNullable<typeof anchor>, originKey: string) {
+    if (originKey !== currentOrigin.current) return;
+    routeRequest.current?.abort();
+    const controller = new AbortController(); routeRequest.current = controller;
+    setRouteLoading(true); setRouteError(null); setRoadRoute(null); setMode('none');
+    try {
+      const result = await getRoadRoute(start, dorm, controller.signal);
+      if (!controller.signal.aborted && originKey === currentOrigin.current) setRoadRoute({ ...result, dormId: dorm.dorm_id, startLabel: start.label });
+    } catch (caught) {
+      if (!controller.signal.aborted) setRouteError(getErrorMessage(caught));
+    } finally { if (!controller.signal.aborted) setRouteLoading(false); }
+  }
+  function openDirections(dorm: Dorm) {
+    if (!anchor) { setRouteError('Choose a school or tap Locate me to set your route’s starting point.'); return; }
+    const start = { ...anchor };
+    const originKey = routeOriginKey;
+    Alert.alert('Show road directions?', `From ${start.label} to ${dorm.name}. The OSRM route service receives these two coordinates to draw the route in RoomScout. No profile or booking details are sent. This is a driving route preview, not live navigation.`, [
+      { text: 'Cancel', style: 'cancel' }, { text: 'Show route', onPress: () => void loadDirections(dorm, start, originKey) },
+    ]);
+  }
+  function clearRoute() { routeRequest.current?.abort(); setRoadRoute(null); setRouteLoading(false); setRouteError(null); }
+  async function openGoogleDirections(dorm: Dorm) {
+    if (!anchor) return;
+    try { await Linking.openURL(googleDirectionsUrl(anchor, dorm)); }
+    catch { setRouteError('Google Maps could not open. You can retry the in-app route.'); }
   }
   const legend = (items: [string, string][]) => <View style={styles.legendRow}>{items.map(([label, color]) => <View key={label} style={styles.legendItem}><View style={[styles.dot, { backgroundColor: color }]} /><Text style={styles.legendText}>{label}</Text></View>)}</View>;
 
   return <View style={styles.container}>
-    <LeafletMapView key={mapRevision} dorms={validDorms} center={center} anchor={anchor || undefined} radiusKm={radiusKm} userLocation={browseWithoutOrigin || useFallbackOrigin ? null : location} analyticsMode={mode} demandPredictions={demandLoading ? {} : forecasts} priceAreas={priceAreas} demandAreas={demandLoading ? [] : demandAreas} onSelectDorm={setSelectedId} onViewportChange={onViewportChange} fitAllDorms={shouldFitDorms} topPadding={panelHeight + insets.top + 24} focusKey={`${focusedDormId ? `dorm:${focusedDormId}:` : ''}${anchor ? 'anchor' : 'browse'}:${center.latitude}:${center.longitude}:${anchor ? radiusKm : ''}:${viewRevision}:${shouldFitDorms ? `${mode}:${Math.ceil(panelHeight)}:${validDorms.map((dorm) => dorm.dorm_id).sort().join(',')}` : ''}`} />
+    <LeafletMapView key={mapRevision} dorms={validDorms} center={center} anchor={anchor || undefined} radiusKm={radiusKm} userLocation={browseWithoutOrigin || useFallbackOrigin ? null : location} analyticsMode={mode} demandPredictions={demandLoading ? {} : forecasts} priceAreas={priceAreas} demandAreas={demandLoading ? [] : demandAreas} onSelectDorm={setSelectedId} onViewportChange={onViewportChange} fitAllDorms={shouldFitDorms} topPadding={panelHeight + insets.top + 24} roadRoute={roadRoute} routeBottomPadding={previewHeight + insets.bottom + 24} focusKey={`${focusedDormId ? `dorm:${focusedDormId}:` : ''}${anchor ? 'anchor' : 'browse'}:${center.latitude}:${center.longitude}:${anchor ? radiusKm : ''}:${viewRevision}:${shouldFitDorms ? `${mode}:${Math.ceil(panelHeight)}:${validDorms.map((dorm) => dorm.dorm_id).sort().join(',')}` : ''}`} />
     <ScrollView onLayout={(event) => { const next = event.nativeEvent.layout.height; setPanelHeight((current) => Math.abs(current-next)>1 ? next : current); }} pointerEvents="box-none" style={[styles.topPanel, { top: insets.top + 8, maxHeight: height * 0.55 }]} contentContainerStyle={styles.topContent} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
       <DiscoverySearchBar value={filters.query} placeholder={searchOrigin?.kind === 'place' ? searchOrigin.label : 'Search dorm or place'} onPress={() => { setOpenFilters(false); setSearchVisible(true); }} onFilterPress={() => { setOpenFilters(true); setSearchVisible(true); }} />
       <View style={styles.anchorRow}>
@@ -236,12 +276,21 @@ export default function MapScreen() {
       {!selected && !loading && validDorms.length === 0 && <View style={styles.analyticsCard}><Text style={styles.notice}>No matching pins. Try fewer filters or explore recommendations in Search.</Text></View>}
     </ScrollView>
     {mode === 'none' && !selected && <View pointerEvents="none" style={[styles.mapLegend, { bottom: 28 + insets.bottom }]}>{anchor ? legend([['Nearby', MAP_COLORS.near], ['Radius edge', MAP_COLORS.edge], ['Outside', MAP_COLORS.far]]) : legend([['Available', AppColors.success], ['Reserved', AppColors.warning], ['Unavailable', AppColors.error]])}<Text style={styles.legendHint}>{!anchor ? 'Browse freely, or choose a school / Locate me to explore a radius.' : filters.radiusEnabled ? `Strict ${radiusKm} km filter · outside pins hidden` : `Exploring ${radiusKm} km from ${anchor.label}`}</Text></View>}
-    {selected && <ScrollView style={[styles.selectedCard, { maxHeight: height * 0.4, bottom: Math.max(8, insets.bottom) }]} contentContainerStyle={styles.selectedContent}>
+    {selected && <ScrollView onLayout={(event) => setPreviewHeight(event.nativeEvent.layout.height)} style={[styles.selectedCard, { maxHeight: height * 0.4, bottom: Math.max(8, insets.bottom) }]} contentContainerStyle={styles.selectedContent}>
       <View style={styles.selectedHeader}><Text style={styles.selectedName}>{selected.name}</Text><Pressable accessibilityLabel="Close dorm preview" onPress={() => setSelectedId(null)} hitSlop={12}><Ionicons name="close-circle" size={25} color={AppColors.textSecondary} /></Pressable></View>
-      <Text style={styles.selectedAddress}>{selected.address}</Text>
-      <View style={[styles.selectedMetrics, compact && styles.stacked]}><Text style={styles.selectedPrice}>{formatPeso(selected.price)} / month</Text><Text style={styles.selectedRating}>{selected.rating_count ? `★ ${selected.rating_average} (${selected.rating_count})` : 'No reviews yet'}{hasPreferences ? ` · ${selected.ranking_score} Match Score` : ''}</Text></View>
+      {!roadRoute && <><Text style={styles.selectedAddress}>{selected.address}</Text>
+      <View style={[styles.selectedMetrics, compact && styles.stacked]}><Text style={styles.selectedPrice}>{formatPeso(selected.price)} / month</Text><Text style={styles.selectedRating}>{selected.rating_count ? `★ ${selected.rating_average} (${selected.rating_count})` : 'No reviews yet'}{hasPreferences ? ` · ${selected.ranking_score} Match Score` : ''}</Text></View></>}
       {mode === 'demand' && <Text style={[styles.forecastText, { color: selectedForecast?.color || MAP_COLORS.insufficient }]}>{demandLoading ? 'Preparing forecast…' : `${selectedForecast?.badge || 'Forecast pending'} — ${selectedForecast?.reason || 'Run Demand again to include this listing.'}`}</Text>}
-      <View style={styles.selectedActions}><Pressable onPress={() => void openDirections(selected)} style={styles.secondaryButton}><Text style={styles.secondaryText}>Directions</Text></Pressable><Pressable onPress={() => router.push(`/(tabs)/${selected.dorm_id}` as never)} style={styles.primaryButton}><Text style={styles.primaryText}>View details</Text></Pressable></View>
+      {routeError && <Text accessibilityRole="alert" style={styles.helper}>{routeError}</Text>}
+      {routeLoading && <View style={styles.selectedActions}><ActivityIndicator color={AppColors.accent}/><Text style={styles.helper}>Finding a road route…</Text><Pressable onPress={clearRoute}><Text style={styles.secondaryText}>Cancel</Text></Pressable></View>}
+      {roadRoute?.dormId === selected.dorm_id && <View style={styles.routeSummary}>
+        <Text style={styles.primaryText}>Driving · {(roadRoute.distanceMeters / 1000).toFixed(1)} km · about {Math.max(1, Math.round(roadRoute.durationSeconds / 60))} min</Text>
+        <Text style={styles.helper}>From {roadRoute.startLabel} → {selected.name}</Text>
+        <Text style={styles.helper}>OSRM / OSM · Driving estimate, no live traffic.{roadRoute.snappedDistanceMeters > 100 ? ' Check the entrance; the pin is away from a mapped road.' : ''}</Text>
+        <Pressable onPress={clearRoute}><Text style={styles.secondaryText}>Clear route</Text></Pressable>
+      </View>}
+      <View style={styles.selectedActions}><Pressable disabled={routeLoading} onPress={() => openDirections(selected)} style={styles.secondaryButton}><Text style={styles.secondaryText}>{roadRoute ? 'Refresh route' : 'Directions'}</Text></Pressable><Pressable onPress={() => router.push(`/(tabs)/${selected.dorm_id}` as never)} style={styles.primaryButton}><Text style={styles.primaryText}>View details</Text></Pressable></View>
+      {anchor && <Pressable accessibilityLabel="Open route in Google Maps" onPress={() => void openGoogleDirections(selected)}><Text style={styles.googleLink}>Open in Google Maps ↗</Text></Pressable>}
     </ScrollView>}
     <DiscoverySearchSheet key={`${searchVisible}-${openFilters}`} visible={searchVisible} openFiltersInitially={openFilters} onClose={() => setSearchVisible(false)} onApplied={(next) => void applySearch(next)} />
     <SchoolPicker visible={schoolVisible} onClose={() => setSchoolVisible(false)} onSelect={chooseSchool} onClear={clearMapLocation} selectedSchool={searchOrigin?.kind === 'school' ? searchOrigin.label : null} />
@@ -273,4 +322,6 @@ const styles = StyleSheet.create({
   selectedHeader: { flexDirection: 'row', gap: 12, alignItems: 'flex-start' }, selectedName: { color: AppColors.text, fontSize: 17, fontWeight: '800', flex: 1 }, selectedAddress: { color: AppColors.textSecondary, fontSize: 12, lineHeight: 18 },
   selectedMetrics: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8 }, stacked: { flexDirection: 'column' }, selectedPrice: { color: AppColors.accent, fontSize: 15, fontWeight: '800' }, selectedRating: { color: AppColors.warning, fontSize: 12, flexShrink: 1, lineHeight: 18 }, forecastText: { fontSize: 12, lineHeight: 18 },
   selectedActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, secondaryButton: { flex: 1, minWidth: 100, alignItems: 'center', padding: 12, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: AppColors.accent }, secondaryText: { color: AppColors.accent, fontWeight: '700', fontSize: 13 }, primaryButton: { flex: 1, minWidth: 100, alignItems: 'center', padding: 12, borderRadius: BorderRadius.md, backgroundColor: AppColors.accent }, primaryText: { color: AppColors.white, fontSize: 13, fontWeight: '700' },
+  routeSummary: { paddingVertical: 10, gap: 7, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: AppColors.border },
+  googleLink: { color: AppColors.accent, fontSize: 12, paddingVertical: 8, textAlign: 'center' },
 });

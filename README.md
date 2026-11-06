@@ -2,6 +2,8 @@
 
 Latest discovery polish: see [November 7 search, demand areas and SNAP notices](docs/NOVEMBER_7_SEARCH_AND_DEMAND.md).
 
+Maps now supports [in-app road directions from a selected campus/location to a dorm](docs/MAP_DIRECTIONS.md), with an optional Google Maps handoff.
+
 RoomScout is an Android-first Expo SDK 57 dorm finder for the SNAP team. The app uses Supabase for authentication/data/realtime and Leaflet with OpenStreetMap for its main discovery map. It can run with cached demo/UI states while unfinished, but production transactions require the supplied Supabase migrations and private document storage.
 
 ## Included now

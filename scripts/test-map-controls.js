@@ -188,6 +188,7 @@ test('failed Locate resets stale filters and shows all pins around a labelled de
     'react-native-safe-area-context': { useSafeAreaInsets: () => ({ top: 0, bottom: 24 }) },
     '@/components/discovery-search': { DiscoverySearchBar: 'SearchBar', DiscoverySearchSheet: 'SearchSheet' },
     '@/components/error-toast': { showWarning() {} },
+    '@/lib/directions': { getRoadRoute: async () => null, googleDirectionsUrl: () => '' },
     '@/components/leaflet-map-view': { LeafletMapView: 'LeafletMapView' }, '@/components/school-picker': { SchoolPicker: 'SchoolPicker' },
     '@/constants/theme': { AppColors: {}, BorderRadius: {} }, '@/context/discovery-context': { useDiscovery: () => context }, '@/hooks/useAuth': { useAuth: () => ({ user: null }) },
     '@/lib/geocoding': { searchPlaces: async () => [] }, '@/lib/logger': { logEvent() {}, getErrorMessage: (error) => error?.message || 'Error' },

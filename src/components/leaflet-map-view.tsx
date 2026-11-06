@@ -4,6 +4,7 @@ import { WebView, type WebViewNavigation } from 'react-native-webview';
 import { AppColors } from '@/constants/theme';
 import { demandLabel, distanceBand, MAP_COLORS, type DemandArea, type MapBounds, type PriceArea } from '@/lib/map-analytics';
 import type { Dorm, UserCoordinates } from '@/types/dorm';
+import type { RoadRoute } from '@/lib/directions';
 
 export type AnalyticsMode = 'price' | 'demand' | 'none';
 interface Props {
@@ -24,6 +25,8 @@ interface Props {
   focusKey?: string;
   fitAllDorms?: boolean;
   topPadding?: number;
+  roadRoute?: RoadRoute | null;
+  routeBottomPadding?: number;
 }
 const EMPTY_PREDICTIONS: NonNullable<Props['demandPredictions']> = {};
 const EMPTY_AREAS: PriceArea[] = [];
@@ -54,7 +57,8 @@ html,body,#map{width:100%;height:100%;margin:0;background:#111827}*{box-sizing:b
   const map=L.map('map',{zoomControl:false,preferCanvas:true,fadeAnimation:false,zoomAnimation:false,markerZoomAnimation:false}).setView([10.32644,123.95476],15);
   const tiles=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors',updateWhenIdle:true,updateWhenZooming:false,keepBuffer:2,detectRetina:false}).addTo(map);
   L.control.zoom({position:'bottomright'}).addTo(map);
-  const listingLayer=L.layerGroup().addTo(map), areaLayer=L.layerGroup().addTo(map), originLayer=L.layerGroup().addTo(map);
+  const listingLayer=L.layerGroup().addTo(map), areaLayer=L.layerGroup().addTo(map), originLayer=L.layerGroup().addTo(map), routeLayer=L.layerGroup().addTo(map);
+  let lastRouteFocus='';
   let lastFocus='', pickerMarker=null, pickerHint=null, latest=null;
   const pinSvg='<svg width="30" height="42" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg"><path d="M15 40C12 35 2 24 2 15a13 13 0 0 1 26 0c0 9-10 20-13 25Z" fill="#2563eb" stroke="white" stroke-width="2"/><circle cx="15" cy="15" r="4" fill="white"/></svg>';
   const pinIcon=L.divIcon({className:'',html:pinSvg,iconSize:[30,42],iconAnchor:[15,42]});
@@ -63,7 +67,7 @@ html,body,#map{width:100%;height:100%;margin:0;background:#111827}*{box-sizing:b
   map.on('moveend zoomend',viewport);
   map.on('click',function(event){if(!latest||!latest.picker)return;pickerMarker.setLatLng(event.latlng);post({type:'pickLocation',latitude:event.latlng.lat,longitude:event.latlng.lng})});
   window.updateRoomScoutMap=function(data){
-    latest=data;listingLayer.clearLayers();areaLayer.clearLayers();originLayer.clearLayers();
+    latest=data;listingLayer.clearLayers();areaLayer.clearLayers();originLayer.clearLayers();routeLayer.clearLayers();
     if(data.anchor){
       L.circle([data.anchor.latitude,data.anchor.longitude],{radius:data.radiusKm*1000,color:'#3B82F6',weight:1,fillColor:'#3B82F6',fillOpacity:.04,interactive:false}).addTo(originLayer);
       if(data.anchor.kind!=='device')L.marker([data.anchor.latitude,data.anchor.longitude],{icon:pinIcon}).bindTooltip(plainText(data.anchor.label),{direction:'top'}).addTo(originLayer);
@@ -105,6 +109,18 @@ html,body,#map{width:100%;height:100%;margin:0;background:#111827}*{box-sizing:b
         map.fitBounds(L.latLngBounds(points),{paddingTopLeft:[24,topPadding],paddingBottomRight:[24,80],maxZoom:data.markers.length===1&&!data.anchor?16:15,animate:false});
       }
     }
+    if(data.roadRoute){
+      const route=data.roadRoute, points=route.coordinates;
+      L.polyline(points,{color:'#fff',weight:9,opacity:.9,interactive:false}).addTo(routeLayer);
+      L.polyline(points,{color:'#2563EB',weight:5,opacity:1,interactive:false}).addTo(routeLayer);
+      const start=[route.start.latitude,route.start.longitude], end=[route.end.latitude,route.end.longitude];
+      L.polyline([start,points[0]],{color:'#2563EB',weight:2,dashArray:'5 5',interactive:false}).addTo(routeLayer);
+      L.polyline([points[points.length-1],end],{color:'#2563EB',weight:2,dashArray:'5 5',interactive:false}).addTo(routeLayer);
+      L.circleMarker(start,{radius:7,color:'#fff',weight:2,fillColor:'#2563EB',fillOpacity:1}).bindTooltip('Route start').addTo(routeLayer);
+      L.circleMarker(end,{radius:7,color:'#fff',weight:2,fillColor:'#10B981',fillOpacity:1}).bindTooltip('Destination').addTo(routeLayer);
+      const routeFocus=JSON.stringify([start,end,data.topPadding,data.routeBottomPadding]);
+      if(routeFocus!==lastRouteFocus){lastRouteFocus=routeFocus;const h=map.getSize().y;const top=Math.min(data.topPadding||160,Math.max(80,h-160));const bottom=Math.min(data.routeBottomPadding||220,Math.max(60,h-top-60));map.fitBounds(L.latLngBounds(points.concat([start,end])),{paddingTopLeft:[28,top],paddingBottomRight:[28,bottom],maxZoom:17,animate:false})}
+    }else lastRouteFocus='';
     map.invalidateSize({pan:false,animate:false});
     viewport();
   };
@@ -113,7 +129,7 @@ html,body,#map{width:100%;height:100%;margin:0;background:#111827}*{box-sizing:b
 })();
 </script></body></html>`;
 
-export function LeafletMapView({ dorms, center, radiusKm, userLocation, anchor, analyticsMode = 'none', showAnalytics = false, onSelectDorm, pickerLocation, onPickLocation, demandPredictions = EMPTY_PREDICTIONS, priceAreas = EMPTY_AREAS, demandAreas = EMPTY_DEMAND_AREAS, onViewportChange, focusKey, fitAllDorms = false, topPadding = 160 }: Props) {
+export function LeafletMapView({ dorms, center, radiusKm, userLocation, anchor, analyticsMode = 'none', showAnalytics = false, onSelectDorm, pickerLocation, onPickLocation, demandPredictions = EMPTY_PREDICTIONS, priceAreas = EMPTY_AREAS, demandAreas = EMPTY_DEMAND_AREAS, onViewportChange, focusKey, fitAllDorms = false, topPadding = 160, roadRoute = null, routeBottomPadding = 220 }: Props) {
   const webView = useRef<WebView>(null);
   const [ready, setReady] = useState(false);
   const [mapError, setMapError] = useState(false);
@@ -126,7 +142,7 @@ export function LeafletMapView({ dorms, center, radiusKm, userLocation, anchor, 
   const activeMode = analyticsMode !== 'none' ? analyticsMode : showAnalytics ? 'price' : 'none';
   const payload = useMemo(() => ({
     center, anchor, radiusKm, user: userLocation, picker: pickerLocation, mode: activeMode, focusKey, fitAllDorms, topPadding,
-    areas: priceAreas, demandAreas, colors: MAP_COLORS,
+    areas: priceAreas, demandAreas, colors: MAP_COLORS, roadRoute, routeBottomPadding,
     markers: dorms.map((dorm) => {
       const demand = demandPredictions[dorm.dorm_id];
       const color = activeMode === 'demand' ? demand?.color || (demand ? MAP_COLORS[demand.level] : MAP_COLORS.insufficient)
@@ -135,7 +151,7 @@ export function LeafletMapView({ dorms, center, radiusKm, userLocation, anchor, 
       return { id: dorm.dorm_id, name: dorm.name.replace(/[<>]/g, ''), lat: dorm.latitude, lng: dorm.longitude,
         color, label: activeMode === 'demand' ? demand ? demandLabel(demand.level) : '…' : `₱${Math.round(dorm.price).toLocaleString('en-PH')}` };
     }),
-  }), [center, anchor, radiusKm, userLocation, pickerLocation, activeMode, focusKey, fitAllDorms, topPadding, priceAreas, demandAreas, dorms, demandPredictions]);
+  }), [center, anchor, radiusKm, userLocation, pickerLocation, activeMode, focusKey, fitAllDorms, topPadding, priceAreas, demandAreas, dorms, demandPredictions, roadRoute, routeBottomPadding]);
   const serialized = safeJson(payload);
   useEffect(() => {
     if (ready) webView.current?.injectJavaScript(`window.updateRoomScoutMap&&window.updateRoomScoutMap(${serialized});true;`);
